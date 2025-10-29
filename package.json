@@ -1,0 +1,24 @@
+{
+  "name": "beyond-horizon-bot",
+  "version": "0.1.0",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "dev": "tsx src/bot.ts",
+    "start": "node dist/bot.js",
+    "build": "tsup src/bot.ts src/register.ts --format esm --dts --out-dir dist --clean",
+    "register": "tsx src/register.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "octokit": "^4.0.2",
+    "openai": "^6.7.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "tsup": "^8.2.4",
+    "tsx": "^4.19.1",
+    "typescript": "^5.5.4"
+  }
+}
