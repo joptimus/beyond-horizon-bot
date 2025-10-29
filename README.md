@@ -1,6 +1,6 @@
 # Beyond Horizon – Idea Bot
 
-Discord → AI → GitHub pipeline for capturing, refining, approving, and voting on player ideas for a space-MMO/RTS (inspired by *Mankind* 2000).  
+Discord → AI → GitHub pipeline for capturing, refining, approving, and voting on player ideas for a space-MMO/RTS.  
 - Creates a **thread** per idea (keeps channels clean)  
 - Uses OpenAI to **enrich** the idea and ask up to **3 clarifying questions**  
 - Lets the submitter **Approve & Post** to GitHub  
