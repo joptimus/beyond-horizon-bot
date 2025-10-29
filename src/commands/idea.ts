@@ -91,7 +91,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     );
 
     const promptMsg = await thread.send({
-      content: "I have a few quick questions before finalizing. Answer now or skip:",
+      content: `<@${interaction.user.id}> I have a few quick questions before finalizing. Answer now or skip:`,
       embeds: [embed],
       components: [row],
     });
@@ -140,7 +140,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   );
 
   await thread.send({
-    content: "Here’s the AI-enriched draft. Approve to post.",
+    content: `<@${interaction.user.id}> Here’s the AI-enriched draft. Approve to post.`,
     embeds: [embed],
     components: [row],
   });
