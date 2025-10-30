@@ -124,3 +124,23 @@ export async function readDiscordVoteCount(issueNumber: number): Promise<number>
   const m = String(existing.body).match(/^Discord votes:\s*(\d+)/i);
   return m ? Number(m[1]) : 0;
 }
+
+export async function fetchIssue(issueNumber: number) {
+  
+  const { data } = await octokit.rest.issues.get({
+    owner: owner,
+    repo: repo,
+    issue_number: issueNumber,
+  });
+  return data; // { title, body, html_url, number, ... }
+}
+
+// Pull the **Summary** block from your standardized issue body
+export function extractSummaryFromIssueBody(body: string | null | undefined): string {
+  if (!body) return "";
+  // Capture text after **Summary** until the next **Section** or end
+  const m = body.match(/\*\*Summary\*\*\s*\n([\s\S]*?)(?:\n\s*\*\*|$)/i);
+  const raw = (m?.[1] || "").trim();
+  // Tidy: collapse extra blank lines
+  return raw.replace(/\n{3,}/g, "\n\n").trim();
+}

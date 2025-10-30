@@ -30,9 +30,9 @@ import * as Priority from './commands/priority.js';
 // ---- AI & pending store for Q→A→Approval flow ----
 import { enrichIdea, toIssueBody } from './ai.js';
 import { getPending, putPending, delPending } from './pending.js';
-import { getIssueFromVoteMessage, linkVoteMessage } from "./votes.js";
+import { getIssueFromVoteMessage, linkVoteMessage } from './votes.js';
 // ---- GitHub helpers (issue + vote sync) ----
-import { createIdeaIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas } from './github.js';
+import { createIdeaIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas, extractSummaryFromIssueBody, fetchIssue } from './github.js';
 
 // ======================
 // Client initialization
@@ -143,7 +143,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
 				// Post the prompt INSIDE the thread
 				const promptMsg = await thread.send({
-					  content: `<@${message.author.id}> I have a few quick questions before finalizing. Answer now or skip:`,
+					content: `<@${message.author.id}> I have a few quick questions before finalizing. Answer now or skip:`,
 					embeds: [qEmbed],
 					components: [qRow],
 				});
@@ -227,6 +227,30 @@ client.on(Events.MessageCreate, async (message: Message) => {
 			const lines = ranked.map((i, idx) => `**${idx + 1}.** #${i.number} — ${i.title} (Discord 👍 ${i.discordVotes})\n${i.html_url}`);
 
 			return message.reply(lines.join('\n\n') || 'No ideas found.');
+		}
+		if (command === 'explain') {
+			const num = Number(args[0]);
+			if (!num || !Number.isInteger(num) || num < 1) {
+				return message.reply('❗ Usage: `!explain <issueNumber>` (e.g., `!explain 42`)');
+			}
+
+			try {
+				const issue = await fetchIssue(num);
+				const summary = extractSummaryFromIssueBody(issue.body || '');
+				const desc = summary ? `**Summary**\n${summary}` : `**Summary**\n_(no summary found in issue body)_`;
+
+				const embed = new EmbedBuilder()
+					.setTitle(`Idea #${issue.number}: ${issue.title}`)
+					.setURL(issue.html_url)
+					.setDescription(desc)
+					.setColor(0x00ae86);
+
+				return message.reply({ embeds: [embed] });
+			} catch (err: any) {
+				// 404 or perms
+				const msg = err?.status === 404 ? `❌ Issue #${num} not found.` : `❌ Could not fetch issue #${num}: ${err?.message || err}`;
+				return message.reply(msg);
+			}
 		}
 	} catch (e: any) {
 		console.error('Prefix handler error:', e);
@@ -332,7 +356,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
 			if (voteMsg && typeof (voteMsg as any).react === 'function') {
 				await (voteMsg as any).react('👍');
-        linkVoteMessage(voteMsg.id, issue.number);
+				linkVoteMessage(voteMsg.id, issue.number);
 			}
 
 			await upsertDiscordVoteComment(issue.number, 0);
@@ -486,29 +510,29 @@ async function recountThumbsUpAndUpdate(m: Message) {
 }
 
 client.on(Events.MessageReactionAdd, async (reaction, user) => {
-  if (user.bot) return;
-  if (reaction.emoji.name !== '👍') return;
+	if (user.bot) return;
+	if (reaction.emoji.name !== '👍') return;
 
-  if (reaction.partial) await reaction.fetch();
+	if (reaction.partial) await reaction.fetch();
 
-  const issueNumber = getIssueFromVoteMessage(reaction.message.id);
-  if (!issueNumber) return;
+	const issueNumber = getIssueFromVoteMessage(reaction.message.id);
+	if (!issueNumber) return;
 
-  const votes = Math.max((reaction.count || 1) - 1, 0); // minus bot seed
-  await upsertDiscordVoteComment(issueNumber, votes);
+	const votes = Math.max((reaction.count || 1) - 1, 0); // minus bot seed
+	await upsertDiscordVoteComment(issueNumber, votes);
 });
 
 client.on(Events.MessageReactionRemove, async (reaction, user) => {
-  if (user.bot) return;
-  if (reaction.emoji.name !== '👍') return;
+	if (user.bot) return;
+	if (reaction.emoji.name !== '👍') return;
 
-  if (reaction.partial) await reaction.fetch();
+	if (reaction.partial) await reaction.fetch();
 
-  const issueNumber = getIssueFromVoteMessage(reaction.message.id);
-  if (!issueNumber) return;
+	const issueNumber = getIssueFromVoteMessage(reaction.message.id);
+	if (!issueNumber) return;
 
-  const votes = Math.max((reaction.count || 1) - 1, 0);
-  await upsertDiscordVoteComment(issueNumber, votes);
+	const votes = Math.max((reaction.count || 1) - 1, 0);
+	await upsertDiscordVoteComment(issueNumber, votes);
 });
 
 // ======================
