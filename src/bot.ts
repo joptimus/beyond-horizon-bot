@@ -348,20 +348,22 @@ client.on(Events.InteractionCreate, async (i) => {
 
 			// 1) Post VOTE message in the PARENT CHANNEL (not in the thread)
 			let voteMsg: Message | null = null;
+
+			const voteEmbed = new EmbedBuilder()
+				.setTitle(`Idea #${issue.number}: ${issue.title}`)
+				.setURL(issue.html_url) // clickable -> GitHub issue
+				.setDescription(desc) // uses the Summary like !explain
+				.setColor(0x00ae86); // same color you use elsewhere
+
 			if (parentChannel && (parentChannel as any).isTextBased?.()) {
-				voteMsg = await (parentChannel as any).send({
-					content: `Idea #${issue.number}: ${issue.title}\n(React with 👍 to vote)`,
-				});
+				voteMsg = await(parentChannel as any).send({ embeds: [voteEmbed] });
 			} else {
 				// Last-resort fallback
-				voteMsg = await i.followUp({
-					content: `Idea #${issue.number}: ${issue.title}\n(React with 👍 to vote)`,
-					fetchReply: true,
-				} as any);
+				voteMsg = await i.followUp({ embeds: [voteEmbed], fetchReply: true } as any);
 			}
 
 			if (voteMsg && typeof (voteMsg as any).react === 'function') {
-				await (voteMsg as any).react('👍');
+				await(voteMsg as any).react('👍');
 				linkVoteMessage(voteMsg.id, issue.number);
 			}
 
@@ -369,7 +371,7 @@ client.on(Events.InteractionCreate, async (i) => {
 
 			// 2) Post CREATED notice INSIDE the THREAD
 			if (thread && (thread as any).isTextBased?.()) {
-				await (thread as any).send(`✅ Created idea **#${issue.number}** - ${issue.title}`);
+				await(thread as any).send(`✅ Created idea **#${issue.number}** - ${issue.title}`);
 			}
 
 			delPending(id);
