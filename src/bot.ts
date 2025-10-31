@@ -323,6 +323,12 @@ client.on(Events.InteractionCreate, async (i) => {
 
 			const issue = await createIdeaIssue({ title: (pending as any).title, body: (pending as any).body });
 
+			// Build the summary like !explain does
+			const summary = extractSummaryFromIssueBody(issue.body || '');
+			const desc = summary
+				? `**Summary**\n${summary}\n\nReact with 👍 to vote.`
+				: `**Summary**\n_(no summary found in issue body)_\n\nReact with 👍 to vote.`;
+
 			// Resolve thread + parent
 			const threadId = (pending as any).threadId || (pending as any).sourceChannelId;
 			const thread = threadId ? await client.channels.fetch(threadId as string) : null;
