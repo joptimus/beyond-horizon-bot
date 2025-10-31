@@ -35,7 +35,7 @@ Return ONLY valid JSON with this exact shape:
   "telemetry": ["what to log/measure"],
   "antiCheat": ["server-authority validations"],
   "dependencies": ["systems/configs impacted"],
-  "openQuestions": ["clear questions for the player (max 3)"],
+  "openQuestions": ["clear questions for the player (max 2)"],
   "tags": ["UI","Economy","Fleet","Territory","PvP","PvE","Server","DB","QoL","Balance"]
 }
 Rules:
@@ -51,7 +51,7 @@ function firstPassPrompt(raw: string, author: string) {
 Given the raw player idea below, produce a concise, developer-ready design note as JSON.
 - Fill "scope.client" / "scope.server" with concrete work items (or ["None"]).
 - Set "scope.database" to specific changes or ["No changes"].
-- Ask at most 3 openQuestions only if helpful; otherwise [].
+- Ask at most 2 openQuestions only if helpful; otherwise [].
 
 <author>${author}</author>
 
@@ -65,7 +65,7 @@ Raw player idea:
 function secondPassPrompt(raw: string, answers: string, author: string, previousJSON: string) {
   return `
 Your task is to refine the existing design note based on player clarifications.
-Keep **openQuestions** to **at most 3**, and remove any that are now answered.
+Keep **openQuestions** to **at most 2**, and remove any that are now answered.
 
 Here is the existing structured design note JSON:
 \`\`\`json
