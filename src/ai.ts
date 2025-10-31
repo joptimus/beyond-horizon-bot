@@ -51,7 +51,7 @@ function firstPassPrompt(raw: string, author: string) {
 Given the raw player idea below, produce a concise, developer-ready design note as JSON.
 - Fill "scope.client" / "scope.server" with concrete work items (or ["None"]).
 - Set "scope.database" to specific changes or ["No changes"].
-- Ask at most 3 openQuestions only if truly needed; otherwise [].
+- Ask at most 3 openQuestions only if helpful; otherwise [].
 
 <author>${author}</author>
 
