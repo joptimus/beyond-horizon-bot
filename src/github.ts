@@ -144,3 +144,14 @@ export function extractSummaryFromIssueBody(body: string | null | undefined): st
   // Tidy: collapse extra blank lines
   return raw.replace(/\n{3,}/g, "\n\n").trim();
 }
+
+export async function createBugIssue({ title, body }: { title: string; body: string }) {
+  const res = await octokit.request("POST /repos/{owner}/{repo}/issues", {
+    owner,
+    repo,
+    title,
+    body,
+    labels: ["bug"]
+  });
+  return res.data;
+}
