@@ -34,7 +34,7 @@ import { enrichBug, toBugIssueBody } from './aiBug.js';
 import { getPending, putPending, delPending } from './pending.js';
 import { getIssueFromVoteMessage, linkVoteMessage } from './votes.js';
 // ---- GitHub helpers (issue + vote sync) ----
-import { createIdeaIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas, extractSummaryFromIssueBody, fetchIssue } from './github.js';
+import { createIdeaIssue, createBugIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas, extractSummaryFromIssueBody, fetchIssue } from './github.js';
 
 // ======================
 // Client initialization
@@ -497,6 +497,85 @@ client.on(Events.InteractionCreate, async (i) => {
 			await clearOldPromptComponents(pending);
 			delPending(id);
 			return i.update({ content: 'Draft **canceled**.', components: [], embeds: [] });
+		}
+	}
+
+	// ----- BUG BUTTONS -----
+	if (i.isButton()) {
+		const [ns, action, id] = i.customId.split(':');
+		if (ns === 'bug') {
+			const pending = getPending(id);
+			if (!pending) return i.reply({ content: '❌ This draft expired. Please try again.', ephemeral: true });
+			if (i.user.id !== pending.authorId) {
+				return i.reply({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+			}
+
+			// Show modal to answer questions
+			if (action === 'answer') {
+				const qs = (pending as any).openQuestions || [];
+				if (!qs.length) return i.reply({ content: 'No questions to answer.', ephemeral: true });
+
+				const modal = new ModalBuilder().setCustomId(`bug:answers:${id}`).setTitle('Answer questions');
+
+				qs.slice(0, 3).forEach((q: string, idx: number) => {
+					const input = new TextInputBuilder()
+						.setCustomId(`q${idx + 1}`)
+						.setLabel(`Q${idx + 1}`)
+						.setStyle(TextInputStyle.Paragraph)
+						.setRequired(false)
+						.setPlaceholder(q)
+						.setMaxLength(1000);
+
+					modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+				});
+
+				return i.showModal(modal);
+			}
+
+			// Skip questions → go to approval
+			if (action === 'skip') {
+				(pending as any).phase = 'awaiting_approval';
+				putPending(pending);
+
+				const embed = new EmbedBuilder()
+					.setTitle((pending as any).title.replace(/^\[BUG\]\s*/, ''))
+					.setDescription('You chose to skip questions. Approve to post.')
+					.setColor(0xe11d48);
+
+				const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+					new ButtonBuilder().setCustomId(`bug:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+					new ButtonBuilder().setCustomId(`bug:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+				);
+
+				return i.update({ content: 'Review the bug report below.', embeds: [embed], components: [row] });
+			}
+
+			// Approve → Create GitHub issue with bug label
+			if (action === 'approve') {
+				await clearOldPromptComponents(pending);
+				await i.update({ content: 'Posting your bug report…', components: [], embeds: [] });
+
+				const issue = await createBugIssue({ title: (pending as any).title, body: (pending as any).body });
+
+				// Post confirmation in thread
+				const threadId = (pending as any).threadId || (pending as any).sourceChannelId;
+				const thread = threadId ? await client.channels.fetch(threadId as string) : null;
+
+				if (thread && (thread as any).isTextBased?.()) {
+					await (thread as any).send(`✅ Bug report posted to GitHub as issue **#${issue.number}**`);
+				}
+
+				delPending(id);
+
+				return i.followUp({ content: `Done. Bug #${issue.number} posted.`, ephemeral: true });
+			}
+
+			// Cancel
+			if (action === 'cancel') {
+				await clearOldPromptComponents(pending);
+				delPending(id);
+				return i.update({ content: 'Bug report **canceled**.', components: [], embeds: [] });
+			}
 		}
 	}
 
