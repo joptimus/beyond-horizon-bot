@@ -379,8 +379,9 @@ client.on(Events.InteractionCreate, async (i) => {
 	// ----- BUTTONS -----
 	if (i.isButton()) {
 		const [ns, action, id] = i.customId.split(':');
-		if (ns !== 'idea') return;
 
+		// ----- IDEA BUTTONS -----
+		if (ns === 'idea') {
 		const pending = getPending(id);
 		if (!pending) return i.reply({ content: '❌ This draft expired. Please try again.', ephemeral: true });
 		if (i.user.id !== pending.authorId) {
@@ -498,11 +499,9 @@ client.on(Events.InteractionCreate, async (i) => {
 			delPending(id);
 			return i.update({ content: 'Draft **canceled**.', components: [], embeds: [] });
 		}
-	}
+		} // end if (ns === 'idea')
 
-	// ----- BUG BUTTONS -----
-	if (i.isButton()) {
-		const [ns, action, id] = i.customId.split(':');
+		// ----- BUG BUTTONS -----
 		if (ns === 'bug') {
 			const pending = getPending(id);
 			if (!pending) return i.reply({ content: '❌ This draft expired. Please try again.', ephemeral: true });
