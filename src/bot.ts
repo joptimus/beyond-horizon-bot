@@ -26,6 +26,7 @@ import crypto from 'node:crypto';
 import * as IdeaSlash from './commands/idea.js';
 import * as IdeasTop from './commands/ideasTop.js';
 import * as Priority from './commands/priority.js';
+import * as BugSlash from './commands/bug.js';
 
 // ---- AI & pending store for Q→A→Approval flow ----
 import { enrichIdea, toIssueBody } from './ai.js';
@@ -52,6 +53,7 @@ const CMDS: Record<string, any> = {
 	[IdeaSlash.data.name]: IdeaSlash,
 	[IdeasTop.data.name]: IdeasTop,
 	[Priority.data.name]: Priority,
+	[BugSlash.data.name]: BugSlash,
 };
 
 client.once(Events.ClientReady, (c) => {
