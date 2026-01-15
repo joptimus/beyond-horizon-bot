@@ -1,5 +1,6 @@
 // src/pending.ts
 export type PendingIdea = {
+  type: 'idea' | 'bug';
   id: string;
   authorId: string;
   rawText: string;
