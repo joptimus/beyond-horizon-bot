@@ -30,6 +30,7 @@ import * as BugSlash from './commands/bug.js';
 
 // ---- AI & pending store for Q→A→Approval flow ----
 import { enrichIdea, toIssueBody } from './ai.js';
+import { enrichBug, toBugIssueBody } from './aiBug.js';
 import { getPending, putPending, delPending } from './pending.js';
 import { getIssueFromVoteMessage, linkVoteMessage } from './votes.js';
 // ---- GitHub helpers (issue + vote sync) ----
@@ -255,6 +256,113 @@ client.on(Events.MessageCreate, async (message: Message) => {
 				const msg = err?.status === 404 ? `❌ Issue #${num} not found.` : `❌ Could not fetch issue #${num}: ${err?.message || err}`;
 				return message.reply(msg);
 			}
+		}
+
+		// -------- !bug (AI → openQuestions? modal : approval) --------
+		if (command === 'bug') {
+			if (!message.guild) return message.reply('❌ Use this in a server channel.');
+
+			const rawText = args.join(' ').trim();
+			if (!rawText) return message.reply('❗ Usage: `!bug <description>`');
+
+			const submitterTag = message.author.tag;
+			const enriched = await enrichBug(rawText, submitterTag);
+			const id = crypto.randomUUID();
+
+			// Create thread for bug report
+			const threadName = `[BUG] ${(enriched.title || rawText).slice(0, 80)}`.slice(0, 95);
+			let thread;
+			if (message.channel.isThread()) {
+				thread = message.channel;
+			} else {
+				thread = await message.startThread({
+					name: threadName,
+					autoArchiveDuration: 1440,
+				});
+			}
+
+			if (enriched.openQuestions?.length) {
+				const questionsList = enriched.openQuestions
+					.slice(0, 3)
+					.map((q, i) => `**Q${i + 1}.** ${q}`)
+					.join('\n');
+
+				const qEmbed = new EmbedBuilder()
+					.setTitle(enriched.title || 'Bug Report')
+					.setDescription(`**Draft Summary**\n${enriched.summary}\n\n**Clarifying Questions**\n${questionsList}`)
+					.setColor(0xe11d48);
+
+				const qRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+					new ButtonBuilder().setCustomId(`bug:answer:${id}`).setLabel('Answer questions').setStyle(ButtonStyle.Primary),
+					new ButtonBuilder().setCustomId(`bug:skip:${id}`).setLabel('Skip to approval').setStyle(ButtonStyle.Secondary)
+				);
+
+				const promptMsg = await thread.send({
+					content: `<@${message.author.id}> I have a few questions to help clarify the bug:`,
+					embeds: [qEmbed],
+					components: [qRow],
+				});
+
+				putPending({
+					type: 'bug',
+					id,
+					authorId: message.author.id,
+					rawText,
+					title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
+					body: toBugIssueBody(enriched, submitterTag),
+					createdAt: Date.now(),
+					openQuestions: enriched.openQuestions.slice(0, 3),
+					phase: 'awaiting_answers',
+					...({ enriched } as any),
+					...({ sourceMessageId: promptMsg.id, sourceChannelId: thread.id, threadId: thread.id, parentChannelId: message.channelId } as any),
+				});
+
+				return;
+			}
+
+			// No questions - straight to approval
+			putPending({
+				type: 'bug',
+				id,
+				authorId: message.author.id,
+				rawText,
+				title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
+				body: toBugIssueBody(enriched, submitterTag),
+				createdAt: Date.now(),
+				phase: 'awaiting_approval',
+				...({ enriched } as any),
+				...({ sourceChannelId: thread.id, threadId: thread.id, parentChannelId: message.channelId } as any),
+			});
+
+			const steps = enriched.stepsToReproduce.length
+				? enriched.stepsToReproduce.map((s, i) => `${i + 1}. ${s}`).join('\n')
+				: '_(not yet specified)_';
+
+			const previewEmbed = new EmbedBuilder()
+				.setTitle(enriched.title || 'Bug Report')
+				.setDescription(
+					[
+						`**Summary**\n${enriched.summary || '(missing)'}`,
+						`\n**Steps to Reproduce**\n${steps}`,
+						`\n**Expected:** ${enriched.expectedBehavior || '(not specified)'}`,
+						`\n**Actual:** ${enriched.actualBehavior || '(not specified)'}`,
+						enriched.frequency ? `\n**Frequency:** ${enriched.frequency}` : '',
+					].join('\n')
+				)
+				.setColor(0xe11d48);
+
+			const previewRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+				new ButtonBuilder().setCustomId(`bug:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+				new ButtonBuilder().setCustomId(`bug:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+			);
+
+			await thread.send({
+				content: 'Here\'s the bug report. Approve to post to GitHub.',
+				embeds: [previewEmbed],
+				components: [previewRow],
+			});
+
+			return;
 		}
 	} catch (e: any) {
 		console.error('Prefix handler error:', e);
