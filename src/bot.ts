@@ -150,6 +150,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
 				// Save pending draft (single putPending), including thread+message ids
 				putPending({
+					type: 'idea',
 					id,
 					authorId: message.author.id,
 					rawText,
@@ -169,6 +170,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 			const thread = await getOrStartIdeaThread(message, (enriched.title || rawText).slice(0, 80));
 
 			putPending({
+				type: 'idea',
 				id,
 				authorId: message.author.id,
 				rawText,

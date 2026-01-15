@@ -98,6 +98,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
     // Save pending with enriched + thread/message references
     putPending({
+      type: 'idea',
       id,
       authorId: interaction.user.id,
       rawText,
@@ -120,6 +121,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const id = crypto.randomUUID();
 
   putPending({
+    type: 'idea',
     id,
     authorId: interaction.user.id,
     rawText,
