@@ -582,86 +582,165 @@ client.on(Events.InteractionCreate, async (i) => {
 	// ----- MODAL SUBMIT (answers) -----
 	if (i.isModalSubmit()) {
 		const [ns, action, id] = i.customId.split(':');
-		if (ns !== 'idea' || action !== 'answers') return;
 
-		const pending = getPending(id);
-		// We might need to reply regardless; handle gracefully
-		if (!pending) {
+		// ----- IDEA MODAL SUBMIT -----
+		if (ns === 'idea' && action === 'answers') {
+			const pending = getPending(id);
+			// We might need to reply regardless; handle gracefully
+			if (!pending) {
+				if (!i.replied && !i.deferred) {
+					return i.reply({ content: '❌ This draft expired.', ephemeral: true });
+				}
+				return i.followUp({ content: '❌ This draft expired.', ephemeral: true });
+			}
+			if (i.user.id !== pending.authorId) {
+				if (!i.replied && !i.deferred) {
+					return i.reply({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+				}
+				return i.followUp({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+			}
+
+			// ✅ Acknowledge within ~3s to avoid "Unknown interaction"
 			if (!i.replied && !i.deferred) {
-				return i.reply({ content: '❌ This draft expired.', ephemeral: true });
+				await i.deferReply({ ephemeral: false });
 			}
-			return i.followUp({ content: '❌ This draft expired.', ephemeral: true });
+
+			// Gather Q/A
+			const qs = (pending as any).openQuestions || [];
+			const qaLines: string[] = [];
+			qs.slice(0, 5).forEach((q: string, idx: number) => {
+				const ans = i.fields.getTextInputValue(`q${idx + 1}`) || '';
+				if (q || ans) {
+					qaLines.push(`Q${idx + 1}: ${q}`);
+					if (ans.trim()) qaLines.push(`A${idx + 1}: ${ans.trim()}`);
+				}
+			});
+			const answersText = qaLines.join('\n');
+
+			// Re-enrich with answers → pass previous JSON for refinement
+			const submitterTag = i.user.tag;
+			const previous = (pending as any).enriched || undefined;
+			const enriched2 = await enrichIdea((pending as any).rawText, submitterTag, answersText, previous);
+
+			const finalTitle = `[IDEA] ${(enriched2.title || (pending as any).rawText).slice(0, 80)}`;
+			const finalBody = toIssueBody(enriched2, submitterTag, i.user.id, (pending as any).rawText, answersText);
+
+			(pending as any).title = finalTitle;
+			(pending as any).body = finalBody;
+			(pending as any).phase = 'awaiting_approval';
+			(pending as any).enriched = enriched2; // keep latest structured JSON
+			putPending(pending);
+
+			const impl2 =
+				Array.isArray(enriched2.implementationNotes) && enriched2.implementationNotes.length
+					? enriched2.implementationNotes.map((d) => `• ${d}`).join('\n')
+					: '• (to be refined)';
+
+			const tagLine2 = Array.isArray(enriched2.tags) && enriched2.tags.length ? `\n**Tags**\n${enriched2.tags.map((t) => `\`${t}\``).join(' ')}` : '';
+
+			const embed = new EmbedBuilder()
+				.setTitle(enriched2.title || 'Idea')
+				.setDescription(
+					[
+						`**Summary**\n${enriched2.summary || '(missing)'}`,
+						`\n**Gameplay Impact**\n${enriched2.gameplayImpact || '(unspecified)'}`,
+						`\n**Key Implementation Notes**\n${impl2}`,
+						tagLine2,
+					].join('\n')
+				)
+				.setColor(0x00ae86);
+
+			const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+				new ButtonBuilder().setCustomId(`idea:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+				new ButtonBuilder().setCustomId(`idea:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+			);
+
+			await clearOldPromptComponents(pending);
+
+			// ✅ Finish the deferred response
+			await i.editReply({
+				content: "Thanks! Here's the refined draft. Approve to post.",
+				embeds: [embed],
+				components: [row],
+			});
 		}
-		if (i.user.id !== pending.authorId) {
+
+		// ----- BUG MODAL SUBMIT -----
+		if (ns === 'bug' && action === 'answers') {
+			const pending = getPending(id);
+			if (!pending) {
+				if (!i.replied && !i.deferred) {
+					return i.reply({ content: '❌ This draft expired.', ephemeral: true });
+				}
+				return i.followUp({ content: '❌ This draft expired.', ephemeral: true });
+			}
+			if (i.user.id !== pending.authorId) {
+				if (!i.replied && !i.deferred) {
+					return i.reply({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+				}
+				return i.followUp({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+			}
+
 			if (!i.replied && !i.deferred) {
-				return i.reply({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+				await i.deferReply({ ephemeral: false });
 			}
-			return i.followUp({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+
+			// Gather Q/A
+			const qs = (pending as any).openQuestions || [];
+			const qaLines: string[] = [];
+			qs.slice(0, 3).forEach((q: string, idx: number) => {
+				const ans = i.fields.getTextInputValue(`q${idx + 1}`) || '';
+				if (q || ans) {
+					qaLines.push(`Q${idx + 1}: ${q}`);
+					if (ans.trim()) qaLines.push(`A${idx + 1}: ${ans.trim()}`);
+				}
+			});
+			const answersText = qaLines.join('\n');
+
+			// Re-enrich with answers
+			const submitterTag = i.user.tag;
+			const previous = (pending as any).enriched || undefined;
+			const enriched2 = await enrichBug((pending as any).rawText, submitterTag, answersText, previous);
+
+			const finalTitle = `[BUG] ${(enriched2.title || (pending as any).rawText).slice(0, 80)}`;
+			const finalBody = toBugIssueBody(enriched2, submitterTag);
+
+			(pending as any).title = finalTitle;
+			(pending as any).body = finalBody;
+			(pending as any).phase = 'awaiting_approval';
+			(pending as any).enriched = enriched2;
+			putPending(pending);
+
+			const steps = enriched2.stepsToReproduce.length
+				? enriched2.stepsToReproduce.map((s, i) => `${i + 1}. ${s}`).join('\n')
+				: '_(not yet specified)_';
+
+			const embed = new EmbedBuilder()
+				.setTitle(enriched2.title || 'Bug Report')
+				.setDescription(
+					[
+						`**Summary**\n${enriched2.summary || '(missing)'}`,
+						`\n**Steps to Reproduce**\n${steps}`,
+						`\n**Expected:** ${enriched2.expectedBehavior || '(not specified)'}`,
+						`\n**Actual:** ${enriched2.actualBehavior || '(not specified)'}`,
+						enriched2.frequency ? `\n**Frequency:** ${enriched2.frequency}` : '',
+					].join('\n')
+				)
+				.setColor(0xe11d48);
+
+			const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+				new ButtonBuilder().setCustomId(`bug:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+				new ButtonBuilder().setCustomId(`bug:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+			);
+
+			await clearOldPromptComponents(pending);
+
+			await i.editReply({
+				content: "Thanks! Here's the refined bug report. Approve to post.",
+				embeds: [embed],
+				components: [row],
+			});
 		}
-
-		// ✅ Acknowledge within ~3s to avoid "Unknown interaction"
-		if (!i.replied && !i.deferred) {
-			await i.deferReply({ ephemeral: false });
-		}
-
-		// Gather Q/A
-		const qs = (pending as any).openQuestions || [];
-		const qaLines: string[] = [];
-		qs.slice(0, 5).forEach((q: string, idx: number) => {
-			const ans = i.fields.getTextInputValue(`q${idx + 1}`) || '';
-			if (q || ans) {
-				qaLines.push(`Q${idx + 1}: ${q}`);
-				if (ans.trim()) qaLines.push(`A${idx + 1}: ${ans.trim()}`);
-			}
-		});
-		const answersText = qaLines.join('\n');
-
-		// Re-enrich with answers → pass previous JSON for refinement
-		const submitterTag = i.user.tag;
-		const previous = (pending as any).enriched || undefined;
-		const enriched2 = await enrichIdea((pending as any).rawText, submitterTag, answersText, previous);
-
-		const finalTitle = `[IDEA] ${(enriched2.title || (pending as any).rawText).slice(0, 80)}`;
-		const finalBody = toIssueBody(enriched2, submitterTag, i.user.id, (pending as any).rawText, answersText);
-
-		(pending as any).title = finalTitle;
-		(pending as any).body = finalBody;
-		(pending as any).phase = 'awaiting_approval';
-		(pending as any).enriched = enriched2; // keep latest structured JSON
-		putPending(pending);
-
-		const impl2 =
-			Array.isArray(enriched2.implementationNotes) && enriched2.implementationNotes.length
-				? enriched2.implementationNotes.map((d) => `• ${d}`).join('\n')
-				: '• (to be refined)';
-
-		const tagLine2 = Array.isArray(enriched2.tags) && enriched2.tags.length ? `\n**Tags**\n${enriched2.tags.map((t) => `\`${t}\``).join(' ')}` : '';
-
-		const embed = new EmbedBuilder()
-			.setTitle(enriched2.title || 'Idea')
-			.setDescription(
-				[
-					`**Summary**\n${enriched2.summary || '(missing)'}`,
-					`\n**Gameplay Impact**\n${enriched2.gameplayImpact || '(unspecified)'}`,
-					`\n**Key Implementation Notes**\n${impl2}`,
-					tagLine2,
-				].join('\n')
-			)
-			.setColor(0x00ae86);
-
-		const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
-			new ButtonBuilder().setCustomId(`idea:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
-			new ButtonBuilder().setCustomId(`idea:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
-		);
-
-		await clearOldPromptComponents(pending);
-
-		// ✅ Finish the deferred response
-		await i.editReply({
-			content: 'Thanks! Here’s the refined draft. Approve to post.',
-			embeds: [embed],
-			components: [row],
-		});
 	}
 });
 
