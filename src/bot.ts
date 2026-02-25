@@ -27,6 +27,8 @@ import * as IdeaSlash from './commands/idea.js';
 import * as IdeasTop from './commands/ideasTop.js';
 import * as Priority from './commands/priority.js';
 import * as BugSlash from './commands/bug.js';
+import * as VerifySlash from './commands/verify.js';
+import * as InviteSlash from './commands/invite.js';
 
 // ---- AI & pending store for Q→A→Approval flow ----
 import { enrichIdea, toIssueBody } from './ai.js';
@@ -35,6 +37,7 @@ import { getPending, putPending, delPending } from './pending.js';
 import { getIssueFromVoteMessage, linkVoteMessage } from './votes.js';
 // ---- GitHub helpers (issue + vote sync) ----
 import { createIdeaIssue, createBugIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas, extractSummaryFromIssueBody, fetchIssue } from './github.js';
+import { verifyDesignation, checkDiscordVerified } from './gameServer.js';
 
 // ======================
 // Client initialization
@@ -55,6 +58,8 @@ const CMDS: Record<string, any> = {
 	[IdeasTop.data.name]: IdeasTop,
 	[Priority.data.name]: Priority,
 	[BugSlash.data.name]: BugSlash,
+	[VerifySlash.data.name]: VerifySlash,
+	[InviteSlash.data.name]: InviteSlash,
 };
 
 client.once(Events.ClientReady, (c) => {
@@ -739,6 +744,64 @@ client.on(Events.InteractionCreate, async (i) => {
 				embeds: [embed],
 				components: [row],
 			});
+		}
+
+		// ----- VERIFY MODAL SUBMIT -----
+		if (ns === 'verify' && action === 'designation') {
+			await i.deferReply({ ephemeral: true });
+
+			try {
+				// Check if user is already verified
+				const check = await checkDiscordVerified(i.user.id);
+				if (check.verified) {
+					return i.editReply({ content: "You're already verified, Commander." });
+				}
+
+				const designation = i.fields.getTextInputValue('designation').trim().toUpperCase();
+
+				const result = await verifyDesignation(designation, i.user.id);
+
+				if (!result.ok) {
+					const messages: Record<string, string> = {
+						INVALID_FORMAT: 'Invalid designation format. Expected: `CMDR-2026-XXXXX`.',
+						NOT_FOUND: 'Designation not recognized. Double-check your code from the verification email.',
+						EMAIL_NOT_VERIFIED: "Your enlistment hasn't been confirmed yet. Check your email for the verification link.",
+						ALREADY_CLAIMED: 'This designation is already linked to a Discord account. If this is an error, contact a moderator.',
+						ALREADY_VERIFIED: "You're already verified, Commander.",
+					};
+					return i.editReply({ content: messages[result.error!] || 'Something went wrong. Try again later.' });
+				}
+
+				const callsign = result.callsign!;
+
+				// Grant @Verified role
+				const roleId = process.env.VERIFIED_ROLE_ID;
+				if (roleId && i.guild) {
+					const member = await i.guild.members.fetch(i.user.id);
+					await member.roles.add(roleId).catch((e) => console.error('Failed to add Verified role:', e));
+					// Set nickname to callsign
+					await member.setNickname(callsign).catch((e) => console.error('Failed to set nickname:', e));
+				}
+
+				// Post welcome embed in enlistment log channel
+				const logChannelId = process.env.ENLISTMENT_LOG_CHANNEL_ID;
+				if (logChannelId) {
+					const logChannel = await client.channels.fetch(logChannelId);
+					if (logChannel?.isTextBased()) {
+						const embed = new EmbedBuilder()
+							.setColor(0x00e5cc)
+							.setDescription(`⟫ Commander **${callsign}** [${designation}] has reported for duty.`);
+						await (logChannel as any).send({ embeds: [embed] }).catch((e: any) => console.error('Failed to post welcome:', e));
+					}
+				}
+
+				return i.editReply({ content: `Verification complete. Welcome aboard, Commander **${callsign}**.` });
+			} catch (err) {
+				console.error('Verify modal error:', err);
+				if (!i.replied) {
+					return i.editReply({ content: 'Something went wrong. Try again later.' });
+				}
+			}
 		}
 	}
 });
