@@ -824,20 +824,29 @@ client.on(Events.InteractionCreate, async (i) => {
 
 		// ----- VERIFY MODAL SUBMIT -----
 		if (ns === 'verify' && action === 'designation') {
+			log.info(`[VERIFY MODAL] Verification started for ${i.user.tag} (${i.user.id})`);
 			await i.deferReply({ ephemeral: true });
 
 			try {
 				// Check if user is already verified
+				log.debug(`[VERIFY MODAL] Checking if user is already verified`);
 				const check = await checkDiscordVerified(i.user.id);
+				log.debug(`[VERIFY MODAL] Verification check result: verified=${check.verified}`);
+
 				if (check.verified) {
+					log.info(`[VERIFY MODAL] User already verified as ${check.callsign}`);
 					return i.editReply({ content: "You're already verified, Commander." });
 				}
 
 				const designation = i.fields.getTextInputValue('designation').trim().toUpperCase();
+				log.info(`[VERIFY MODAL] User submitted designation: ${designation}`);
 
+				log.debug(`[VERIFY MODAL] Calling verifyDesignation API`);
 				const result = await verifyDesignation(designation, i.user.id);
+				log.info(`[VERIFY MODAL] API response: ok=${result.ok}, error=${result.error}`);
 
 				if (!result.ok) {
+					log.warn(`[VERIFY MODAL] Verification failed with error: ${result.error}`);
 					const messages: Record<string, string> = {
 						INVALID_FORMAT: 'Invalid designation format. Expected: `CMDR-2026-XXXXX`.',
 						NOT_FOUND: 'Designation not recognized. Double-check your code from the verification email.',
@@ -849,31 +858,65 @@ client.on(Events.InteractionCreate, async (i) => {
 				}
 
 				const callsign = result.callsign!;
+				log.info(`[VERIFY MODAL] ✅ Verification successful! Callsign: ${callsign}`);
 
 				// Grant @Verified role
 				const roleId = process.env.VERIFIED_ROLE_ID;
+				log.debug(`[VERIFY MODAL] VERIFIED_ROLE_ID from env: ${roleId}`);
+
 				if (roleId && i.guild) {
-					const member = await i.guild.members.fetch(i.user.id);
-					await member.roles.add(roleId).catch((e) => console.error('Failed to add Verified role:', e));
-					// Set nickname to callsign
-					await member.setNickname(callsign).catch((e) => console.error('Failed to set nickname:', e));
+					try {
+						log.debug(`[VERIFY MODAL] Fetching guild member`);
+						const member = await i.guild.members.fetch(i.user.id);
+
+						log.debug(`[VERIFY MODAL] Adding verified role`);
+						await member.roles.add(roleId).catch((e) => {
+							log.error(`[VERIFY MODAL] Failed to add Verified role:`, e);
+						});
+
+						log.debug(`[VERIFY MODAL] Setting nickname to callsign: ${callsign}`);
+						await member.setNickname(callsign).catch((e) => {
+							log.error(`[VERIFY MODAL] Failed to set nickname:`, e);
+						});
+						log.info(`[VERIFY MODAL] ✅ Role and nickname updated for ${i.user.tag}`);
+					} catch (roleError) {
+						log.error(`[VERIFY MODAL] Error updating member:`, roleError);
+					}
+				} else {
+					log.warn(`[VERIFY MODAL] ⚠️ Could not add role - VERIFIED_ROLE_ID=${roleId}, guild=${!!i.guild}`);
 				}
 
 				// Post welcome embed in enlistment log channel
 				const logChannelId = process.env.ENLISTMENT_LOG_CHANNEL_ID;
+				log.debug(`[VERIFY MODAL] ENLISTMENT_LOG_CHANNEL_ID from env: ${logChannelId}`);
+
 				if (logChannelId) {
-					const logChannel = await client.channels.fetch(logChannelId);
-					if (logChannel?.isTextBased()) {
-						const embed = new EmbedBuilder()
-							.setColor(0x00e5cc)
-							.setDescription(`⟫ Commander **${callsign}** [${designation}] has reported for duty.`);
-						await (logChannel as any).send({ embeds: [embed] }).catch((e: any) => console.error('Failed to post welcome:', e));
+					try {
+						log.debug(`[VERIFY MODAL] Fetching enlistment log channel`);
+						const logChannel = await client.channels.fetch(logChannelId);
+						if (logChannel?.isTextBased()) {
+							log.debug(`[VERIFY MODAL] Posting welcome message to log channel`);
+							const embed = new EmbedBuilder()
+								.setColor(0x00e5cc)
+								.setDescription(`⟫ Commander **${callsign}** [${designation}] has reported for duty.`);
+							await (logChannel as any).send({ embeds: [embed] }).catch((e: any) => {
+								log.error(`[VERIFY MODAL] Failed to post welcome message:`, e);
+							});
+							log.info(`[VERIFY MODAL] ✅ Welcome message posted to log channel`);
+						} else {
+							log.warn(`[VERIFY MODAL] ⚠️ Log channel not text-based`);
+						}
+					} catch (channelError) {
+						log.error(`[VERIFY MODAL] Error accessing log channel:`, channelError);
 					}
+				} else {
+					log.warn(`[VERIFY MODAL] ⚠️ ENLISTMENT_LOG_CHANNEL_ID not set`);
 				}
 
+				log.info(`[VERIFY MODAL] ✅ Verification complete for ${i.user.tag} as ${callsign}`);
 				return i.editReply({ content: `Verification complete. Welcome aboard, Commander **${callsign}**.` });
 			} catch (err) {
-				console.error('Verify modal error:', err);
+				log.error(`[VERIFY MODAL] ❌ Unexpected error:`, err);
 				if (!i.replied) {
 					return i.editReply({ content: 'Something went wrong. Try again later.' });
 				}
