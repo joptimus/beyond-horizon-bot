@@ -862,12 +862,16 @@ client.on(Events.InteractionCreate, async (i) => {
 
 				// Grant @Verified role
 				const roleId = process.env.VERIFIED_ROLE_ID;
+				const guildId = process.env.DISCORD_GUILD_ID;
 				log.debug(`[VERIFY MODAL] VERIFIED_ROLE_ID from env: ${roleId}`);
 
-				if (roleId && i.guild) {
+				if (roleId && guildId) {
 					try {
 						log.debug(`[VERIFY MODAL] Fetching guild member`);
-						const member = await i.guild.members.fetch(i.user.id);
+						const guild = await client.guilds.fetch(guildId!);
+
+					log.debug(`[VERIFY MODAL] Fetching guild member ${i.user.id}`);
+					const member = await guild.members.fetch(i.user.id);
 
 						log.debug(`[VERIFY MODAL] Adding verified role`);
 						await member.roles.add(roleId).catch((e) => {
@@ -883,7 +887,7 @@ client.on(Events.InteractionCreate, async (i) => {
 						log.error(`[VERIFY MODAL] Error updating member:`, roleError);
 					}
 				} else {
-					log.warn(`[VERIFY MODAL] ⚠️ Could not add role - VERIFIED_ROLE_ID=${roleId}, guild=${!!i.guild}`);
+					log.warn(`[VERIFY MODAL] ⚠️ Could not add role - VERIFIED_ROLE_ID=${roleId}, guildId=${guildId}`);
 				}
 
 				// Post welcome embed in enlistment log channel
