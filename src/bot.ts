@@ -41,6 +41,22 @@ import { createIdeaIssue, createBugIssue, upsertDiscordVoteComment, readDiscordV
 import { verifyDesignation, checkDiscordVerified } from './gameServer.js';
 
 // ======================
+// Logging Setup
+// ======================
+const log = {
+	info: (msg: string) => console.log(`[INFO] ${new Date().toISOString()} ${msg}`),
+	warn: (msg: string, err?: any) => {
+		if (err) console.warn(`[WARN] ${new Date().toISOString()} ${msg}`, err);
+		else console.warn(`[WARN] ${new Date().toISOString()} ${msg}`);
+	},
+	error: (msg: string, err?: any) => {
+		if (err) console.error(`[ERROR] ${new Date().toISOString()} ${msg}`, err);
+		else console.error(`[ERROR] ${new Date().toISOString()} ${msg}`);
+	},
+	debug: (msg: string) => console.log(`[DEBUG] ${new Date().toISOString()} ${msg}`),
+};
+
+// ======================
 // Client initialization
 // ======================
 const client = new Client({
@@ -53,6 +69,8 @@ const client = new Client({
 	],
 	partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
+
+log.info('Bot client created');
 
 // Map slash names → modules
 const CMDS: Record<string, any> = {
@@ -119,14 +137,19 @@ async function getOrStartIdeaThread(message: Message, title: string) {
 // ======================
 client.on(Events.InteractionCreate, async (interaction) => {
 	if (!interaction.isChatInputCommand()) return;
+	log.info(`[SLASH CMD] ${interaction.commandName} called by ${interaction.user.tag} (${interaction.user.id})`);
+
 	const mod = CMDS[interaction.commandName];
 	if (!mod) {
+		log.warn(`[SLASH CMD] Unknown command: ${interaction.commandName}`);
 		return interaction.reply({ content: 'Unknown command', ephemeral: true });
 	}
 	try {
+		log.debug(`[SLASH CMD] Executing ${interaction.commandName}`);
 		await mod.execute(interaction);
+		log.info(`[SLASH CMD] ${interaction.commandName} completed successfully`);
 	} catch (e: any) {
-		console.error('Slash command error:', e);
+		log.error(`[SLASH CMD] ${interaction.commandName} failed:`, e);
 		if (interaction.deferred || interaction.replied) {
 			await interaction.editReply({ content: `❌ Error: ${e?.message || String(e)}` }).catch(() => {});
 		} else {
@@ -415,9 +438,11 @@ client.on(Events.InteractionCreate, async (i) => {
 	// ----- BUTTONS -----
 	if (i.isButton()) {
 		const [ns, action, id] = i.customId.split(':');
+		log.info(`[BUTTON] ${i.customId} clicked by ${i.user.tag} (${i.user.id})`);
 
 		// ----- IDEA BUTTONS -----
 		if (ns === 'idea') {
+			log.debug(`[BUTTON] Processing idea button: action=${action}, id=${id}`);
 		const pending = getPending(id);
 		if (!pending) return i.reply({ content: '❌ This draft expired. Please try again.', ephemeral: true });
 		if (i.user.id !== pending.authorId) {
@@ -615,11 +640,13 @@ client.on(Events.InteractionCreate, async (i) => {
 
 		// ----- VERIFY BUTTON -----
 		if (i.customId === 'open_verify_modal') {
+			log.debug(`[VERIFY BUTTON] Opening verify modal for ${i.user.tag}`);
 			try {
 				const modal = buildVerifyModal();
+				log.debug(`[VERIFY BUTTON] Modal created, showing to user`);
 				return i.showModal(modal);
 			} catch (err) {
-				console.error('Failed to show verify modal:', err);
+				log.error(`[VERIFY BUTTON] Failed to show verify modal:`, err);
 				if (!i.replied && !i.deferred) {
 					return i.reply({
 						content: 'Could not open verification form. Try again.',
@@ -633,9 +660,11 @@ client.on(Events.InteractionCreate, async (i) => {
 	// ----- MODAL SUBMIT (answers) -----
 	if (i.isModalSubmit()) {
 		const [ns, action, id] = i.customId.split(':');
+		log.info(`[MODAL] ${i.customId} submitted by ${i.user.tag} (${i.user.id})`);
 
 		// ----- IDEA MODAL SUBMIT -----
 		if (ns === 'idea' && action === 'answers') {
+			log.debug(`[MODAL] Processing idea answers modal`);
 			const pending = getPending(id);
 			// We might need to reply regardless; handle gracefully
 			if (!pending) {
@@ -926,12 +955,14 @@ client.on(Events.MessageReactionRemove, async (reaction, user) => {
 // Member Join Flow (Welcome DM + Verify Channel Post)
 // ======================
 client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
+	log.info(`[MEMBER JOIN] ${member.user.tag} (${member.user.id}) joined guild ${member.guild.id}`);
 	try {
 		// 1. Build verify modal and button using helpers
-		const verifyModal = buildVerifyModal();
+		log.debug(`[MEMBER JOIN] Building verify modal and button`);
 		const buttonRow = buildVerifyButton();
 
 		// 3. Build DM embed
+		log.debug(`[MEMBER JOIN] Creating DM embed`);
 		const dmEmbed = new EmbedBuilder()
 			.setTitle('V1-PR · INCOMING TRANSMISSION')
 			.setDescription(
@@ -943,26 +974,32 @@ client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
 			.setFooter({ text: 'Voran Defense Systems · V1-PR Automated Systems' });
 
 		// 4. Send DM to user
+		log.debug(`[MEMBER JOIN] Attempting to send DM to ${member.user.tag}`);
 		try {
 			await member.send({
 				embeds: [dmEmbed],
 				components: [buttonRow],
 			});
+			log.info(`[MEMBER JOIN] ✅ DM sent successfully to ${member.user.tag}`);
 		} catch (dmError) {
 			// User has DMs disabled; that's ok, channel post will catch them
-			console.warn(`Could not DM ${member.user.tag} (DMs may be disabled)`);
+			log.warn(`[MEMBER JOIN] ❌ Could not DM ${member.user.tag} (likely DMs disabled):`, dmError);
 		}
 
 		// 5. Post in verify channel
 		const verifyChannelId = process.env.VERIFY_CHANNEL_ID;
+		log.debug(`[MEMBER JOIN] VERIFY_CHANNEL_ID from env: ${verifyChannelId}`);
+
 		if (verifyChannelId) {
 			try {
+				log.debug(`[MEMBER JOIN] Fetching verify channel: ${verifyChannelId}`);
 				const verifyChannel = await client.channels.fetch(verifyChannelId);
 				if (!verifyChannel) {
-					console.warn('Verify channel not found:', verifyChannelId);
+					log.warn(`[MEMBER JOIN] ❌ Verify channel not found: ${verifyChannelId}`);
 				} else if (!verifyChannel.isTextBased()) {
-					console.warn('Verify channel is not text-based:', verifyChannelId);
+					log.warn(`[MEMBER JOIN] ❌ Verify channel is not text-based: ${verifyChannelId}`);
 				} else {
+					log.debug(`[MEMBER JOIN] Creating channel embed`);
 					const channelEmbed = new EmbedBuilder()
 						.setTitle('V1-PR · NEW ARRIVAL')
 						.setDescription(
@@ -972,18 +1009,22 @@ client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
 						.setColor(0x00e5cc)
 						.setFooter({ text: 'Voran Defense Systems' });
 
+					log.debug(`[MEMBER JOIN] Sending message to verify channel`);
 					await (verifyChannel as any).send({
 						content: `<@${member.user.id}>`,
 						embeds: [channelEmbed],
 						components: [buttonRow],
 					});
+					log.info(`[MEMBER JOIN] ✅ Channel message sent to verify channel for ${member.user.tag}`);
 				}
 			} catch (channelError) {
-				console.warn(`Failed to post to verify channel (${verifyChannelId}):`, channelError);
+				log.error(`[MEMBER JOIN] ❌ Failed to post to verify channel (${verifyChannelId}):`, channelError);
 			}
+		} else {
+			log.warn(`[MEMBER JOIN] ⚠️ VERIFY_CHANNEL_ID not set in environment`);
 		}
 	} catch (error) {
-		console.error('guildMemberAdd handler error:', error);
+		log.error(`[MEMBER JOIN] ❌ Unexpected error in guildMemberAdd handler:`, error);
 	}
 });
 
