@@ -14,7 +14,7 @@ import activityRoute from './routes/activity.js';
 
 export function startApi(client: Client) {
 	const app = express();
-	const port = Number(process.env.API_PORT) || 3847;
+	const port = Number(process.env.API_PORT) || Number(process.env.PORT) || 3847;
 
 	app.use(express.json());
 	app.use(loggerMiddleware);

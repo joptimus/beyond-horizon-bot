@@ -10,7 +10,9 @@ export function authMiddleware(req: Request, res: Response, next: NextFunction) 
 	}
 
 	const token = header.slice(7);
-	if (token !== process.env.API_KEY) {
+	const expected = process.env.API_KEY || '';
+	console.log(`🔑 Auth: received ...${token.slice(-4)} | expected ...${expected.slice(-4)}`);
+	if (token !== expected) {
 		res.status(403).json({ error: 'Invalid API key' });
 		return;
 	}
