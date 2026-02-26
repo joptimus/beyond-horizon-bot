@@ -1,6 +1,7 @@
 import express from 'express';
 import type { Client, Guild } from 'discord.js';
 import { authMiddleware } from './middleware/auth.js';
+import { loggerMiddleware } from './middleware/logger.js';
 import statusRoute from './routes/status.js';
 import channelsRoute from './routes/channels.js';
 import messagesRoute from './routes/messages.js';
@@ -16,6 +17,7 @@ export function startApi(client: Client) {
 	const port = Number(process.env.API_PORT) || 3847;
 
 	app.use(express.json());
+	app.use(loggerMiddleware);
 	app.use(authMiddleware);
 
 	// Make discord client and guild available to routes
