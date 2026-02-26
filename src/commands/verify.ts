@@ -5,7 +5,7 @@ import {
 	ActionRowBuilder,
 	TextInputBuilder,
 	TextInputStyle,
-} from 'discord.js';
+} from 'discord.js'; 
 
 export const data = new SlashCommandBuilder()
 	.setName('verify')

@@ -8,6 +8,7 @@ import {
 	EmbedBuilder,
 	Events,
 	GatewayIntentBits,
+	GuildMember,
 	Message,
 	MessageReaction,
 	MessageReactionEventDetails,
@@ -41,6 +42,22 @@ import { createIdeaIssue, createBugIssue, upsertDiscordVoteComment, readDiscordV
 import { verifyDesignation, checkDiscordVerified } from './gameServer.js';
 
 // ======================
+// Logging Setup
+// ======================
+const log = {
+	info: (msg: string) => console.log(`[INFO] ${new Date().toISOString()} ${msg}`),
+	warn: (msg: string, err?: any) => {
+		if (err) console.warn(`[WARN] ${new Date().toISOString()} ${msg}`, err);
+		else console.warn(`[WARN] ${new Date().toISOString()} ${msg}`);
+	},
+	error: (msg: string, err?: any) => {
+		if (err) console.error(`[ERROR] ${new Date().toISOString()} ${msg}`, err);
+		else console.error(`[ERROR] ${new Date().toISOString()} ${msg}`);
+	},
+	debug: (msg: string) => console.log(`[DEBUG] ${new Date().toISOString()} ${msg}`),
+};
+
+// ======================
 // Client initialization
 // ======================
 const client = new Client({
@@ -49,9 +66,12 @@ const client = new Client({
 		GatewayIntentBits.GuildMessages, // prefix messages
 		GatewayIntentBits.MessageContent, // read "!idea ..." content (enable in Dev Portal)
 		GatewayIntentBits.GuildMessageReactions, // 👍 add/remove
+		GatewayIntentBits.GuildMembers, // new member join events
 	],
 	partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
+
+log.info('Bot client created');
 
 // Map slash names → modules
 const CMDS: Record<string, any> = {
@@ -62,6 +82,35 @@ const CMDS: Record<string, any> = {
 	[VerifySlash.data.name]: VerifySlash,
 	[InviteSlash.data.name]: InviteSlash,
 };
+
+// =====================
+// Helpers: Verify Modal & Button
+// =====================
+function buildVerifyModal(): ModalBuilder {
+	const modal = new ModalBuilder()
+		.setCustomId('verify:designation')
+		.setTitle('Enlistment Verification');
+
+	const input = new TextInputBuilder()
+		.setCustomId('designation')
+		.setLabel('Commander Designation')
+		.setStyle(TextInputStyle.Short)
+		.setPlaceholder('CMDR-2026-XXXXX')
+		.setRequired(true)
+		.setMinLength(14)
+		.setMaxLength(16);
+
+	return modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+}
+
+function buildVerifyButton(): ActionRowBuilder<ButtonBuilder> {
+	return new ActionRowBuilder<ButtonBuilder>().addComponents(
+		new ButtonBuilder()
+			.setCustomId('open_verify_modal')
+			.setLabel('VERIFY DESIGNATION')
+			.setStyle(ButtonStyle.Primary)
+	);
+}
 
 client.once(Events.ClientReady, (c) => {
 	console.log(`🤖 Logged in as ${c.user.tag}`);
@@ -90,14 +139,19 @@ async function getOrStartIdeaThread(message: Message, title: string) {
 // ======================
 client.on(Events.InteractionCreate, async (interaction) => {
 	if (!interaction.isChatInputCommand()) return;
+	log.info(`[SLASH CMD] ${interaction.commandName} called by ${interaction.user.tag} (${interaction.user.id})`);
+
 	const mod = CMDS[interaction.commandName];
 	if (!mod) {
+		log.warn(`[SLASH CMD] Unknown command: ${interaction.commandName}`);
 		return interaction.reply({ content: 'Unknown command', ephemeral: true });
 	}
 	try {
+		log.debug(`[SLASH CMD] Executing ${interaction.commandName}`);
 		await mod.execute(interaction);
+		log.info(`[SLASH CMD] ${interaction.commandName} completed successfully`);
 	} catch (e: any) {
-		console.error('Slash command error:', e);
+		log.error(`[SLASH CMD] ${interaction.commandName} failed:`, e);
 		if (interaction.deferred || interaction.replied) {
 			await interaction.editReply({ content: `❌ Error: ${e?.message || String(e)}` }).catch(() => {});
 		} else {
@@ -386,9 +440,11 @@ client.on(Events.InteractionCreate, async (i) => {
 	// ----- BUTTONS -----
 	if (i.isButton()) {
 		const [ns, action, id] = i.customId.split(':');
+		log.info(`[BUTTON] ${i.customId} clicked by ${i.user.tag} (${i.user.id})`);
 
 		// ----- IDEA BUTTONS -----
 		if (ns === 'idea') {
+			log.debug(`[BUTTON] Processing idea button: action=${action}, id=${id}`);
 		const pending = getPending(id);
 		if (!pending) return i.reply({ content: '❌ This draft expired. Please try again.', ephemeral: true });
 		if (i.user.id !== pending.authorId) {
@@ -583,14 +639,34 @@ client.on(Events.InteractionCreate, async (i) => {
 				return i.update({ content: 'Bug report **canceled**.', components: [], embeds: [] });
 			}
 		}
+
+		// ----- VERIFY BUTTON -----
+		if (i.customId === 'open_verify_modal') {
+			log.debug(`[VERIFY BUTTON] Opening verify modal for ${i.user.tag}`);
+			try {
+				const modal = buildVerifyModal();
+				log.debug(`[VERIFY BUTTON] Modal created, showing to user`);
+				return i.showModal(modal);
+			} catch (err) {
+				log.error(`[VERIFY BUTTON] Failed to show verify modal:`, err);
+				if (!i.replied && !i.deferred) {
+					return i.reply({
+						content: 'Could not open verification form. Try again.',
+						ephemeral: true
+					}).catch(() => {});
+				}
+			}
+		}
 	}
 
 	// ----- MODAL SUBMIT (answers) -----
 	if (i.isModalSubmit()) {
 		const [ns, action, id] = i.customId.split(':');
+		log.info(`[MODAL] ${i.customId} submitted by ${i.user.tag} (${i.user.id})`);
 
 		// ----- IDEA MODAL SUBMIT -----
 		if (ns === 'idea' && action === 'answers') {
+			log.debug(`[MODAL] Processing idea answers modal`);
 			const pending = getPending(id);
 			// We might need to reply regardless; handle gracefully
 			if (!pending) {
@@ -750,20 +826,29 @@ client.on(Events.InteractionCreate, async (i) => {
 
 		// ----- VERIFY MODAL SUBMIT -----
 		if (ns === 'verify' && action === 'designation') {
+			log.info(`[VERIFY MODAL] Verification started for ${i.user.tag} (${i.user.id})`);
 			await i.deferReply({ ephemeral: true });
 
 			try {
 				// Check if user is already verified
+				log.debug(`[VERIFY MODAL] Checking if user is already verified`);
 				const check = await checkDiscordVerified(i.user.id);
+				log.debug(`[VERIFY MODAL] Verification check result: verified=${check.verified}`);
+
 				if (check.verified) {
+					log.info(`[VERIFY MODAL] User already verified as ${check.callsign}`);
 					return i.editReply({ content: "You're already verified, Commander." });
 				}
 
 				const designation = i.fields.getTextInputValue('designation').trim().toUpperCase();
+				log.info(`[VERIFY MODAL] User submitted designation: ${designation}`);
 
+				log.debug(`[VERIFY MODAL] Calling verifyDesignation API`);
 				const result = await verifyDesignation(designation, i.user.id);
+				log.info(`[VERIFY MODAL] API response: ok=${result.ok}, error=${result.error}`);
 
 				if (!result.ok) {
+					log.warn(`[VERIFY MODAL] Verification failed with error: ${result.error}`);
 					const messages: Record<string, string> = {
 						INVALID_FORMAT: 'Invalid designation format. Expected: `CMDR-2026-XXXXX`.',
 						NOT_FOUND: 'Designation not recognized. Double-check your code from the verification email.',
@@ -775,31 +860,69 @@ client.on(Events.InteractionCreate, async (i) => {
 				}
 
 				const callsign = result.callsign!;
+				log.info(`[VERIFY MODAL] ✅ Verification successful! Callsign: ${callsign}`);
 
 				// Grant @Verified role
 				const roleId = process.env.VERIFIED_ROLE_ID;
-				if (roleId && i.guild) {
-					const member = await i.guild.members.fetch(i.user.id);
-					await member.roles.add(roleId).catch((e) => console.error('Failed to add Verified role:', e));
-					// Set nickname to callsign
-					await member.setNickname(callsign).catch((e) => console.error('Failed to set nickname:', e));
+				const guildId = process.env.DISCORD_GUILD_ID;
+				log.debug(`[VERIFY MODAL] VERIFIED_ROLE_ID from env: ${roleId}`);
+
+				if (roleId && guildId) {
+					try {
+						log.debug(`[VERIFY MODAL] Fetching guild member`);
+						const guild = await client.guilds.fetch(guildId!);
+
+					log.debug(`[VERIFY MODAL] Fetching guild member ${i.user.id}`);
+					const member = await guild.members.fetch(i.user.id);
+
+						log.debug(`[VERIFY MODAL] Adding verified role`);
+						await member.roles.add(roleId).catch((e) => {
+							log.error(`[VERIFY MODAL] Failed to add Verified role:`, e);
+						});
+
+						log.debug(`[VERIFY MODAL] Setting nickname to callsign: ${callsign}`);
+						await member.setNickname(callsign).catch((e) => {
+							log.error(`[VERIFY MODAL] Failed to set nickname:`, e);
+						});
+						log.info(`[VERIFY MODAL] ✅ Role and nickname updated for ${i.user.tag}`);
+					} catch (roleError) {
+						log.error(`[VERIFY MODAL] Error updating member:`, roleError);
+					}
+				} else {
+					log.warn(`[VERIFY MODAL] ⚠️ Could not add role - VERIFIED_ROLE_ID=${roleId}, guildId=${guildId}`);
 				}
 
 				// Post welcome embed in enlistment log channel
 				const logChannelId = process.env.ENLISTMENT_LOG_CHANNEL_ID;
+				log.debug(`[VERIFY MODAL] ENLISTMENT_LOG_CHANNEL_ID from env: ${logChannelId}`);
+
 				if (logChannelId) {
-					const logChannel = await client.channels.fetch(logChannelId);
-					if (logChannel?.isTextBased()) {
-						const embed = new EmbedBuilder()
-							.setColor(0x00e5cc)
-							.setDescription(`⟫ Commander **${callsign}** [${designation}] has reported for duty.`);
-						await (logChannel as any).send({ embeds: [embed] }).catch((e: any) => console.error('Failed to post welcome:', e));
+					try {
+						log.debug(`[VERIFY MODAL] Fetching enlistment log channel`);
+						const logChannel = await client.channels.fetch(logChannelId);
+						if (logChannel?.isTextBased()) {
+							log.debug(`[VERIFY MODAL] Posting welcome message to log channel`);
+							const embed = new EmbedBuilder()
+								.setColor(0x00e5cc)
+								.setDescription(`⟫ Commander **${callsign}** [${designation}] has reported for duty.`);
+							await (logChannel as any).send({ embeds: [embed] }).catch((e: any) => {
+								log.error(`[VERIFY MODAL] Failed to post welcome message:`, e);
+							});
+							log.info(`[VERIFY MODAL] ✅ Welcome message posted to log channel`);
+						} else {
+							log.warn(`[VERIFY MODAL] ⚠️ Log channel not text-based`);
+						}
+					} catch (channelError) {
+						log.error(`[VERIFY MODAL] Error accessing log channel:`, channelError);
 					}
+				} else {
+					log.warn(`[VERIFY MODAL] ⚠️ ENLISTMENT_LOG_CHANNEL_ID not set`);
 				}
 
+				log.info(`[VERIFY MODAL] ✅ Verification complete for ${i.user.tag} as ${callsign}`);
 				return i.editReply({ content: `Verification complete. Welcome aboard, Commander **${callsign}**.` });
 			} catch (err) {
-				console.error('Verify modal error:', err);
+				log.error(`[VERIFY MODAL] ❌ Unexpected error:`, err);
 				if (!i.replied) {
 					return i.editReply({ content: 'Something went wrong. Try again later.' });
 				}
@@ -875,6 +998,83 @@ client.on(Events.MessageReactionRemove, async (reaction, user) => {
 
 	const votes = Math.max((reaction.count || 1) - 1, 0);
 	await upsertDiscordVoteComment(issueNumber, votes);
+});
+
+// ======================
+// Member Join Flow (Welcome DM + Verify Channel Post)
+// ======================
+client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
+	log.info(`[MEMBER JOIN] ${member.user.tag} (${member.user.id}) joined guild ${member.guild.id}`);
+	try {
+		// 1. Build verify modal and button using helpers
+		log.debug(`[MEMBER JOIN] Building verify modal and button`);
+		const buttonRow = buildVerifyButton();
+
+		// 3. Build DM embed
+		log.debug(`[MEMBER JOIN] Creating DM embed`);
+		const dmEmbed = new EmbedBuilder()
+			.setTitle('V1-PR · INCOMING TRANSMISSION')
+			.setDescription(
+				'Commander, your arrival at the frontier has been logged.\n\n' +
+				'If you\'ve already enlisted at **beyondhorizononline.com**, link your designation to unlock full access to this channel.\n\n' +
+				'If you haven\'t enlisted yet, head to [beyondhorizononline.com](https://beyondhorizononline.com) to secure your callsign before someone else does.'
+			)
+			.setColor(0x00e5cc)
+			.setFooter({ text: 'Voran Defense Systems · V1-PR Automated Systems' });
+
+		// 4. Send DM to user
+		log.debug(`[MEMBER JOIN] Attempting to send DM to ${member.user.tag}`);
+		try {
+			await member.send({
+				embeds: [dmEmbed],
+				components: [buttonRow],
+			});
+			log.info(`[MEMBER JOIN] ✅ DM sent successfully to ${member.user.tag}`);
+		} catch (dmError) {
+			// User has DMs disabled; that's ok, channel post will catch them
+			log.warn(`[MEMBER JOIN] ❌ Could not DM ${member.user.tag} (likely DMs disabled):`, dmError);
+		}
+
+		// 5. Post in verify channel
+		const verifyChannelId = process.env.VERIFY_CHANNEL_ID;
+		log.debug(`[MEMBER JOIN] VERIFY_CHANNEL_ID from env: ${verifyChannelId}`);
+
+		if (verifyChannelId) {
+			try {
+				log.debug(`[MEMBER JOIN] Fetching verify channel: ${verifyChannelId}`);
+				const verifyChannel = await client.channels.fetch(verifyChannelId);
+				if (!verifyChannel) {
+					log.warn(`[MEMBER JOIN] ❌ Verify channel not found: ${verifyChannelId}`);
+				} else if (!verifyChannel.isTextBased()) {
+					log.warn(`[MEMBER JOIN] ❌ Verify channel is not text-based: ${verifyChannelId}`);
+				} else {
+					log.debug(`[MEMBER JOIN] Creating channel embed`);
+					const channelEmbed = new EmbedBuilder()
+						.setTitle('V1-PR · NEW ARRIVAL')
+						.setDescription(
+							'A new commander has entered the sector. Welcome aboard.\n\n' +
+							'Use the button below or type `/verify` to link your enlistment designation.'
+						)
+						.setColor(0x00e5cc)
+						.setFooter({ text: 'Voran Defense Systems' });
+
+					log.debug(`[MEMBER JOIN] Sending message to verify channel`);
+					await (verifyChannel as any).send({
+						content: `<@${member.user.id}>`,
+						embeds: [channelEmbed],
+						components: [buttonRow],
+					});
+					log.info(`[MEMBER JOIN] ✅ Channel message sent to verify channel for ${member.user.tag}`);
+				}
+			} catch (channelError) {
+				log.error(`[MEMBER JOIN] ❌ Failed to post to verify channel (${verifyChannelId}):`, channelError);
+			}
+		} else {
+			log.warn(`[MEMBER JOIN] ⚠️ VERIFY_CHANNEL_ID not set in environment`);
+		}
+	} catch (error) {
+		log.error(`[MEMBER JOIN] ❌ Unexpected error in guildMemberAdd handler:`, error);
+	}
 });
 
 // ======================
