@@ -21,6 +21,7 @@ import {
 } from 'discord.js';
 
 import crypto from 'node:crypto';
+import { startApi } from './api.js';
 
 // ---- Slash command modules (keep these in ./commands) ----
 import * as IdeaSlash from './commands/idea.js';
@@ -64,6 +65,7 @@ const CMDS: Record<string, any> = {
 
 client.once(Events.ClientReady, (c) => {
 	console.log(`🤖 Logged in as ${c.user.tag}`);
+	startApi(client);
 });
 
 // Create a public thread off the invoking message (prefix flow)
