@@ -63,6 +63,35 @@ const CMDS: Record<string, any> = {
 	[InviteSlash.data.name]: InviteSlash,
 };
 
+// =====================
+// Helpers: Verify Modal & Button
+// =====================
+function buildVerifyModal(): ModalBuilder {
+	const modal = new ModalBuilder()
+		.setCustomId('verify:designation')
+		.setTitle('Enlistment Verification');
+
+	const input = new TextInputBuilder()
+		.setCustomId('designation')
+		.setLabel('Commander Designation')
+		.setStyle(TextInputStyle.Short)
+		.setPlaceholder('CMDR-2026-XXXXX')
+		.setRequired(true)
+		.setMinLength(14)
+		.setMaxLength(16);
+
+	return modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+}
+
+function buildVerifyButton(): ActionRowBuilder<ButtonBuilder> {
+	return new ActionRowBuilder<ButtonBuilder>().addComponents(
+		new ButtonBuilder()
+			.setCustomId('open_verify_modal')
+			.setLabel('VERIFY DESIGNATION')
+			.setStyle(ButtonStyle.Primary)
+	);
+}
+
 client.once(Events.ClientReady, (c) => {
 	console.log(`🤖 Logged in as ${c.user.tag}`);
 });
@@ -585,21 +614,18 @@ client.on(Events.InteractionCreate, async (i) => {
 
 		// ----- VERIFY BUTTON -----
 		if (i.customId === 'open_verify_modal') {
-			const modal = new ModalBuilder()
-				.setCustomId('verify:designation')
-				.setTitle('Enlistment Verification');
-
-			const input = new TextInputBuilder()
-				.setCustomId('designation')
-				.setLabel('Commander Designation')
-				.setStyle(TextInputStyle.Short)
-				.setPlaceholder('CMDR-2026-XXXXX')
-				.setRequired(true)
-				.setMinLength(14)
-				.setMaxLength(16);
-
-			modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
-			return i.showModal(modal);
+			try {
+				const modal = buildVerifyModal();
+				return i.showModal(modal);
+			} catch (err) {
+				console.error('Failed to show verify modal:', err);
+				if (!i.replied && !i.deferred) {
+					return i.reply({
+						content: 'Could not open verification form. Try again.',
+						ephemeral: true
+					}).catch(() => {});
+				}
+			}
 		}
 	}
 
@@ -900,29 +926,9 @@ client.on(Events.MessageReactionRemove, async (reaction, user) => {
 // ======================
 client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
 	try {
-		// 1. Build verify modal (inline since it's only used here + verify slash command)
-		const verifyModal = new ModalBuilder()
-			.setCustomId('verify:designation')
-			.setTitle('Enlistment Verification');
-
-		const designationInput = new TextInputBuilder()
-			.setCustomId('designation')
-			.setLabel('Commander Designation')
-			.setStyle(TextInputStyle.Short)
-			.setPlaceholder('CMDR-2026-XXXXX')
-			.setRequired(true)
-			.setMinLength(14)
-			.setMaxLength(16);
-
-		verifyModal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(designationInput));
-
-		// 2. Build verify button
-		const verifyButton = new ButtonBuilder()
-			.setCustomId('open_verify_modal')
-			.setLabel('VERIFY DESIGNATION')
-			.setStyle(ButtonStyle.Primary);
-
-		const buttonRow = new ActionRowBuilder<ButtonBuilder>().addComponents(verifyButton);
+		// 1. Build verify modal and button using helpers
+		const verifyModal = buildVerifyModal();
+		const buttonRow = buildVerifyButton();
 
 		// 3. Build DM embed
 		const dmEmbed = new EmbedBuilder()
@@ -951,7 +957,11 @@ client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
 		if (verifyChannelId) {
 			try {
 				const verifyChannel = await client.channels.fetch(verifyChannelId);
-				if (verifyChannel && verifyChannel.isTextBased()) {
+				if (!verifyChannel) {
+					console.warn('Verify channel not found:', verifyChannelId);
+				} else if (!verifyChannel.isTextBased()) {
+					console.warn('Verify channel is not text-based:', verifyChannelId);
+				} else {
 					const channelEmbed = new EmbedBuilder()
 						.setTitle('V1-PR · NEW ARRIVAL')
 						.setDescription(
@@ -968,7 +978,7 @@ client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
 					});
 				}
 			} catch (channelError) {
-				console.warn(`Could not post to verify channel: ${channelError}`);
+				console.warn(`Failed to post to verify channel (${verifyChannelId}):`, channelError);
 			}
 		}
 	} catch (error) {
