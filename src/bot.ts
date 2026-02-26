@@ -8,6 +8,7 @@ import {
 	EmbedBuilder,
 	Events,
 	GatewayIntentBits,
+	GuildMember,
 	Message,
 	MessageReaction,
 	MessageReactionEventDetails,
@@ -581,6 +582,25 @@ client.on(Events.InteractionCreate, async (i) => {
 				return i.update({ content: 'Bug report **canceled**.', components: [], embeds: [] });
 			}
 		}
+
+		// ----- VERIFY BUTTON -----
+		if (i.customId === 'open_verify_modal') {
+			const modal = new ModalBuilder()
+				.setCustomId('verify:designation')
+				.setTitle('Enlistment Verification');
+
+			const input = new TextInputBuilder()
+				.setCustomId('designation')
+				.setLabel('Commander Designation')
+				.setStyle(TextInputStyle.Short)
+				.setPlaceholder('CMDR-2026-XXXXX')
+				.setRequired(true)
+				.setMinLength(14)
+				.setMaxLength(16);
+
+			modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+			return i.showModal(modal);
+		}
 	}
 
 	// ----- MODAL SUBMIT (answers) -----
@@ -873,6 +893,87 @@ client.on(Events.MessageReactionRemove, async (reaction, user) => {
 
 	const votes = Math.max((reaction.count || 1) - 1, 0);
 	await upsertDiscordVoteComment(issueNumber, votes);
+});
+
+// ======================
+// Member Join Flow (Welcome DM + Verify Channel Post)
+// ======================
+client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
+	try {
+		// 1. Build verify modal (inline since it's only used here + verify slash command)
+		const verifyModal = new ModalBuilder()
+			.setCustomId('verify:designation')
+			.setTitle('Enlistment Verification');
+
+		const designationInput = new TextInputBuilder()
+			.setCustomId('designation')
+			.setLabel('Commander Designation')
+			.setStyle(TextInputStyle.Short)
+			.setPlaceholder('CMDR-2026-XXXXX')
+			.setRequired(true)
+			.setMinLength(14)
+			.setMaxLength(16);
+
+		verifyModal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(designationInput));
+
+		// 2. Build verify button
+		const verifyButton = new ButtonBuilder()
+			.setCustomId('open_verify_modal')
+			.setLabel('VERIFY DESIGNATION')
+			.setStyle(ButtonStyle.Primary);
+
+		const buttonRow = new ActionRowBuilder<ButtonBuilder>().addComponents(verifyButton);
+
+		// 3. Build DM embed
+		const dmEmbed = new EmbedBuilder()
+			.setTitle('V1-PR · INCOMING TRANSMISSION')
+			.setDescription(
+				'Commander, your arrival at the frontier has been logged.\n\n' +
+				'If you\'ve already enlisted at **beyondhorizononline.com**, link your designation to unlock full access to this channel.\n\n' +
+				'If you haven\'t enlisted yet, head to [beyondhorizononline.com](https://beyondhorizononline.com) to secure your callsign before someone else does.'
+			)
+			.setColor(0x00e5cc)
+			.setFooter({ text: 'Voran Defense Systems · V1-PR Automated Systems' });
+
+		// 4. Send DM to user
+		try {
+			await member.send({
+				embeds: [dmEmbed],
+				components: [buttonRow],
+			});
+		} catch (dmError) {
+			// User has DMs disabled; that's ok, channel post will catch them
+			console.warn(`Could not DM ${member.user.tag} (DMs may be disabled)`);
+		}
+
+		// 5. Post in verify channel
+		const verifyChannelId = process.env.VERIFY_CHANNEL_ID;
+		if (verifyChannelId) {
+			try {
+				const verifyChannel = await client.channels.fetch(verifyChannelId);
+				if (verifyChannel && verifyChannel.isTextBased()) {
+					const channelEmbed = new EmbedBuilder()
+						.setTitle('V1-PR · NEW ARRIVAL')
+						.setDescription(
+							'A new commander has entered the sector. Welcome aboard.\n\n' +
+							'Use the button below or type `/verify` to link your enlistment designation.'
+						)
+						.setColor(0x00e5cc)
+						.setFooter({ text: 'Voran Defense Systems' });
+
+					await (verifyChannel as any).send({
+						content: `<@${member.user.id}>`,
+						embeds: [channelEmbed],
+						components: [buttonRow],
+					});
+				}
+			} catch (channelError) {
+				console.warn(`Could not post to verify channel: ${channelError}`);
+			}
+		}
+	} catch (error) {
+		console.error('guildMemberAdd handler error:', error);
+	}
 });
 
 // ======================
