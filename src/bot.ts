@@ -49,6 +49,7 @@ const client = new Client({
 		GatewayIntentBits.GuildMessages, // prefix messages
 		GatewayIntentBits.MessageContent, // read "!idea ..." content (enable in Dev Portal)
 		GatewayIntentBits.GuildMessageReactions, // 👍 add/remove
+		GatewayIntentBits.GuildMembers, // new member join events
 	],
 	partials: [Partials.Message, Partials.Channel, Partials.Reaction],
 });
