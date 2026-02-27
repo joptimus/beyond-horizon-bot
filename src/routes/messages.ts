@@ -5,10 +5,15 @@ import { push } from '../services/activityLog.js';
 const router = Router();
 
 router.post('/', async (req, res) => {
+	console.log('[API/MESSAGES] POST request received');
+	console.log('[API/MESSAGES] Request body:', JSON.stringify(req.body, null, 2));
+
 	const guild = req.app.get('guild');
 	if (!guild) return res.status(503).json({ error: 'Bot not connected' });
 
 	const { channelId, content, embed, pin } = req.body;
+
+	console.log('[API/MESSAGES] Parsed fields - channelId:', channelId, 'content:', content, 'embed:', embed, 'pin:', pin);
 
 	if (!channelId) {
 		return res.status(400).json({ error: 'channelId is required' });
@@ -43,6 +48,7 @@ router.post('/', async (req, res) => {
 			}
 		}
 
+		console.log('[API/MESSAGES] Message payload to send:', JSON.stringify(messagePayload, null, 2));
 		const sent = await channel.send(messagePayload);
 
 		if (pin) {
@@ -55,12 +61,17 @@ router.post('/', async (req, res) => {
 			color: '#748ffc',
 		});
 
+		console.log('[API/MESSAGES] ✅ Message sent successfully. ID:', sent.id);
 		res.json({
 			success: true,
 			messageId: sent.id,
 			channelId: channel.id,
 		});
 	} catch (err: any) {
+		console.error('[API/MESSAGES] ❌ Error sending message:');
+		console.error('[API/MESSAGES] Error message:', err.message);
+		console.error('[API/MESSAGES] Error code:', err.code);
+		console.error('[API/MESSAGES] Full error:', err);
 		res.status(500).json({ error: err.message });
 	}
 });
