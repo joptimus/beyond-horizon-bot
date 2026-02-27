@@ -39,7 +39,11 @@ router.post('/', async (req, res) => {
 			if (embed.title) embedBuilder.setTitle(embed.title);
 			if (embed.description) embedBuilder.setDescription(embed.description || content);
 			if (embed.color) embedBuilder.setColor(embed.color);
-			if (embed.footer) embedBuilder.setFooter({ text: embed.footer });
+			if (embed.footer) {
+				// Handle both string and object footer formats
+				const footerData = typeof embed.footer === 'string' ? { text: embed.footer } : embed.footer;
+				embedBuilder.setFooter(footerData);
+			}
 			if (embed.timestamp) embedBuilder.setTimestamp();
 			messagePayload.embeds = [embedBuilder];
 
