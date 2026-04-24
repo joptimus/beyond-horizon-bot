@@ -1,134 +1,199 @@
-# Beyond Horizon – Idea Bot
+# Beyond Horizon Bot
 
-Discord → AI → GitHub pipeline for capturing, refining, approving, and voting on player ideas for a space-MMO/RTS.  
-- Creates a **thread** per idea (keeps channels clean)  
-- Uses OpenAI to **enrich** the idea and ask up to **3 clarifying questions**  
-- Lets the submitter **Approve & Post** to GitHub  
-- Posts a **vote message** in the parent channel (👍 to vote)  
-- **Syncs vote counts** back to the GitHub issue comment in real time
+A Discord bot for the Beyond Horizon space-MMO/RTS community. It handles player idea and bug report submissions through an AI-enrichment pipeline that posts structured GitHub issues, syncs votes, verifies player enlistment designations, and exposes a REST API for external integrations.
 
 ---
 
-## ✨ Features
+## What It Does
 
-- **Dual command styles**: `/idea` (slash) or `!idea` (prefix)
-- **Threaded flow**: all Q&A and approval happen in a dedicated thread
-- **Auto-enrichment**: OpenAI summarizes, scopes, and proposes implementation notes
-- **Clarifications**: Bot asks **≤ 3** short questions when needed
-- **Approval gate**: submitter must approve before posting to GitHub
-- **Voting message stays in channel** (no GitHub URL visible)
-- **Live GitHub sync**: 👍 reactions update a “Discord Votes” issue comment
+### Idea Submission Pipeline
+Players submit ideas via `/idea` or `!idea`. The bot:
+1. Creates a dedicated thread to keep channels clean
+2. Sends the raw text through OpenAI to generate a structured draft (title, summary, gameplay impact, implementation notes, tags, risks)
+3. If the AI has clarifying questions, prompts the submitter to answer or skip
+4. Presents a preview embed with Approve / Cancel buttons
+5. On approval, creates a GitHub issue and posts a vote embed in the parent channel
+6. Syncs 👍 reaction counts back to the GitHub issue as a comment in real time
+
+### Bug Report Pipeline
+Same flow as ideas via `/bug` or `!bug`, with a bug-specific AI enrichment (steps to reproduce, expected vs actual behavior, frequency) and a separate GitHub label.
+
+### Player Verification
+New members are prompted to link their enlistment designation from beyondhorizononline.com. The bot calls the game server API to validate the designation, grants the Verified role, sets their nickname to their callsign, and posts a welcome message to the enlistment log channel.
+
+### REST API
+An Express server runs alongside the bot (default port `3847`) for external integrations. All routes require a `Bearer` token (`API_KEY` env var).
+
+| Route | Purpose |
+|---|---|
+| `GET /status` | Bot health / uptime |
+| `GET /channels` | List guild channels |
+| `GET/POST /messages` | Read or send messages |
+| `POST /moderate` | Moderation actions |
+| `GET /roles` | List guild roles |
+| `GET /stats` | Message activity stats |
+| `GET /leaderboard` | Member leaderboard |
+| `GET /schedules` | Scheduled posts |
+| `GET /activity` | Activity log |
 
 ---
 
-## 🧱 Project Structure
+## Commands
+
+### Slash Commands
+
+| Command | Description |
+|---|---|
+| `/idea <text>` | Submit a game idea |
+| `/bug <text>` | Submit a bug report |
+| `/ideas top [count]` | List top ideas by vote count |
+| `/priority <issue> <level>` | Set P1–P5 priority on a GitHub issue (requires Manage Guild) |
+| `/verify` | Link an enlistment designation to your Discord account |
+| `/invite` | Get a server invite link |
+
+### Prefix Commands (`!`)
+
+| Command | Description |
+|---|---|
+| `!idea <text>` | Submit a game idea |
+| `!bug <text>` | Submit a bug report |
+| `!ideas [count]` | List top ideas by vote count |
+| `!explain <issue#>` | Show the summary for a GitHub issue |
+
+---
+
+## Project Structure
 
 ```
 src/
-  bot.ts                 # main entry (prefix + slash interactions)
-  ai.ts                  # OpenAI prompting & JSON structuring logic
+  bot.ts                     # Main entry — slash/prefix routing, button/modal flows, reaction sync, member join
+  ai.ts                      # OpenAI enrichment for ideas (enrichIdea, toIssueBody)
+  aiBug.ts                   # OpenAI enrichment for bug reports (enrichBug, toBugIssueBody)
+  github.ts                  # Octokit wrapper — create issues, upsert vote comments, list/fetch issues
+  gameServer.ts              # Game server API client — verifyDesignation, checkDiscordVerified
+  pending.ts                 # In-memory store for draft ideas/bugs (10-min TTL)
+  votes.ts                   # messageId <-> GitHub issue number map for vote syncing
+  ranking.ts                 # Sort ideas by Discord votes + priority weight
+  register.ts                # Slash command registration script
+  types.ts                   # Shared TypeScript types
+  api.ts                     # Express server setup
   commands/
-    idea.ts              # /idea slash command implementation
-  pending.ts             # in-progress idea storage (answering / approval)
-  votes.ts               # messageId <-> issueNumber tracking for votes
-  github.ts              # create issue + upsert reaction-synced comment
+    idea.ts                  # /idea slash command
+    bug.ts                   # /bug slash command
+    ideasTop.ts              # /ideas top slash command
+    priority.ts              # /priority slash command
+    verify.ts                # /verify slash command
+    invite.ts                # /invite slash command
+  routes/
+    status.ts                # GET /status
+    channels.ts              # GET /channels
+    messages.ts              # GET/POST /messages
+    moderate.ts              # POST /moderate
+    roles.ts                 # GET /roles
+    stats.ts                 # GET /stats
+    leaderboard.ts           # GET /leaderboard
+    schedules.ts             # GET /schedules
+    activity.ts              # GET /activity
+  middleware/
+    auth.ts                  # Bearer token auth for the REST API
+    logger.ts                # Request logging
+  services/
+    activityLog.ts           # Activity tracking service
 ```
 
 ---
 
-## 🔧 Requirements
+## Requirements
 
-- Node 18+
-- Discord Bot with:
+- **Node.js 22+**
+- **Discord Bot** with:
   - Scopes: `bot`, `applications.commands`
-  - Privileged Intent: **Message Content**
-  - Permissions: Send Messages, Create Public Threads, Add Reactions, Read History
-- GitHub Personal Access Token (`repo` scope) *or* GitHub App
-- OpenAI API Key
+  - Privileged intents: Message Content, Guild Members
+  - Permissions: Send Messages, Create Public Threads, Add Reactions, Read Message History, Manage Nicknames, Manage Roles
+- **GitHub Personal Access Token** with `repo` scope
+- **OpenAI API Key**
+- **Game server** running the Beyond Horizon API (for `/verify`)
 
 ---
 
-## 🔐 Environment Variables
+## Environment Variables
 
-Create `.env` (not committed) and commit `.env.example`:
+Copy `.env.example` to `.env` and fill in all values:
 
-```
+```env
+# Discord
 DISCORD_TOKEN=
-OPENAI_API_KEY=
-OPENAI_MODEL=gpt-4o-mini
+DISCORD_APP_ID=
+DISCORD_GUILD_ID=
 
+# GitHub
 GITHUB_TOKEN=
-GITHUB_OWNER=Christ139
-GITHUB_REPO=SpaceMMORPG
+GITHUB_OWNER=
+GITHUB_REPO=
+
+# OpenAI
+OPENAI_API_KEY=
+
+# Game server
+GAME_SERVER_URL=
+GAME_SERVER_API_KEY=
+
+# Discord role/channel IDs
+VERIFIED_ROLE_ID=
+VERIFY_CHANNEL_ID=
+ENLISTMENT_LOG_CHANNEL_ID=
+
+# REST API
+API_KEY=               # Bearer token required by all API routes
+API_PORT=3847          # Optional, defaults to 3847
+
+# Optional tuning
+MIN_REACTIONS_FOR_IDEA=0
 ```
 
 ---
 
-## 🚀 Running Locally
+## Running
 
-```
+```bash
 npm install
-npm run dev      # runs src/bot.ts
+
+# Development (hot reload)
+npm run dev
+
+# Production
 npm run build
-npm start        # runs dist/bot.js
+npm run start
 ```
 
-Recommended `package.json` scripts:
+For persistent hosting, use a process manager:
+
+```bash
+npm install -g pm2
+npm run build
+pm2 start dist/bot.js --name beyond-horizon-bot
+pm2 save
+pm2 startup
 ```
-"scripts": {
-  "dev": "tsx src/bot.ts",
-  "build": "tsc -p tsconfig.json",
-  "start": "node dist/bot.js"
-}
-```
 
----
+### Register Slash Commands
 
-## 🧵 How the Idea Flow Works
+Run once after adding or changing slash commands:
 
-1. User submits:
-   ```
-   /idea <text>
-   ```
-   or
-   ```
-   !idea <text>
-   ```
-2. Bot creates a **thread**
-3. Bot enriches the idea using AI
-4. If needed, bot asks **up to 3** clarifying questions
-5. User answers → AI refines draft → Bot asks for **Approve & Post**
-6. Upon approval:
-   - A **GitHub issue** is created
-   - A **vote message** is posted in the parent channel
-   - Users vote by reacting 👍
-   - Vote counts sync automatically to GitHub
-
----
-
-## 🗳️ Vote Syncing
-
-- A 👍 reaction on the vote message increments the vote count in GitHub
-- Removing 👍 reduces the count
-- A single GitHub issue comment tracks the total
-- Mapping is stored in `votes.ts`
-
-Client requires:
-```
-partials: [Partials.Message, Partials.Reaction, Partials.Channel]
-intents: [
-  Guilds,
-  GuildMessages,
-  GuildMessageReactions,
-  MessageContent
-]
+```bash
+node dist/register.js
 ```
 
 ---
 
+## Notes
 
-## 📄 License
-
-MIT — free to modify and use.
+- **In-memory state**: Draft ideas/bugs (`pending.ts`) and vote mappings (`votes.ts`) are stored in memory and are lost on restart. Any in-flight submissions will expire.
+- **Vote sync**: The bot seeds each vote embed with a 👍 reaction. Vote counts in GitHub reflect non-bot reactions only.
+- **Priority weights**: P1=50, P2=25, P3=10, P4=5, P5=1 — added to Discord vote count when ranking ideas.
 
 ---
+
+## License
+
+MIT
