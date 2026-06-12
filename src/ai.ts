@@ -1,5 +1,7 @@
 // src/ai.ts
 import OpenAI from "openai";
+import type { CodeContext } from "./codeContextTypes.js";
+import { renderWhereToStart } from "./codeContextTypes.js";
 
 // ---- Env & client ----
 const API_KEY = process.env.OPENAI_API_KEY;
@@ -230,13 +232,17 @@ export function toIssueBody(
   userTag: string,
   userId: string,
   raw: string,
-  qa?: string
+  qa?: string,
+  codeContext?: CodeContext | null
 ) {
   const scope = [
     `**Client (Unity)**\n${linesOrNone(e.scope?.client)}`,
     `\n**Server (Node)**\n${linesOrNone(e.scope?.server)}`,
     `\n**Database**\n${linesOrNone(e.scope?.database)}`,
   ].join("\n");
+
+  const whereToStart = renderWhereToStart(codeContext);
+  const whereBlock = whereToStart ? `\n**Where to Start**\n${whereToStart}\n` : "";
 
   const tags =
     Array.isArray(e.tags) && e.tags.length
@@ -252,7 +258,7 @@ ${e.summary || "(missing)"}
 ${e.gameplayImpact || "(unspecified)"}
 
 ${scope}
-
+${whereBlock}
 **Implementation Notes**
 ${linesOrNone(e.implementationNotes)}
 

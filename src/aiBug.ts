@@ -1,5 +1,7 @@
 // src/aiBug.ts
 import OpenAI from "openai";
+import type { CodeContext } from "./codeContextTypes.js";
+import { renderWhereToStart } from "./codeContextTypes.js";
 
 const API_KEY = process.env.OPENAI_API_KEY;
 if (!API_KEY) throw new Error("Missing OPENAI_API_KEY in .env");
@@ -150,27 +152,52 @@ export async function enrichBug(
   }
 }
 
-export function toBugIssueBody(bug: EnrichedBug, userTag: string): string {
-  const steps = bug.stepsToReproduce.length
-    ? bug.stepsToReproduce.map((s, i) => `${i + 1}. ${s}`).join("\n")
-    : "Not specified";
+export function toBugIssueBody(
+  bug: EnrichedBug,
+  userTag: string,
+  raw?: string,
+  qa?: string,
+  codeContext?: CodeContext | null
+): string {
+  const parts: string[] = [];
 
-  return `## Summary
-${bug.summary}
+  parts.push(`## Summary\n${bug.summary}`);
 
-## Steps to Reproduce
-${steps}
+  const whereToStart = renderWhereToStart(codeContext);
+  if (whereToStart) {
+    let where = `## Where to Start\n${whereToStart}`;
+    if (codeContext?.suspectedCause) where += `\n\n**Suspected cause:** ${codeContext.suspectedCause}`;
+    parts.push(where);
+  }
 
-## Expected Behavior
-${bug.expectedBehavior}
+  if (codeContext?.affectedSystems?.length) {
+    parts.push(`## Affected Systems\n${codeContext.affectedSystems.map((s) => `\`${s}\``).join(" ")}`);
+  }
 
-## Actual Behavior
-${bug.actualBehavior}
+  // Reproduction — only the sub-parts that have content (no forced "Not specified").
+  const repro: string[] = [];
+  if (bug.actualBehavior && bug.actualBehavior !== "Not specified") {
+    repro.push(`**Conditions:** ${bug.actualBehavior}`);
+  }
+  if (bug.stepsToReproduce.length) {
+    repro.push(`**Steps (if known):**\n${bug.stepsToReproduce.map((s, i) => `${i + 1}. ${s}`).join("\n")}`);
+  }
+  if (bug.frequency) repro.push(`**Frequency:** ${bug.frequency}`);
+  if (repro.length) parts.push(`## Reproduction\n${repro.join("\n")}`);
 
-## Frequency
-${bug.frequency || "Not specified"}
+  // Expected vs Actual — only when at least one is specified.
+  const hasExpected = bug.expectedBehavior && bug.expectedBehavior !== "Not specified";
+  const hasActual = bug.actualBehavior && bug.actualBehavior !== "Not specified";
+  if (hasExpected || hasActual) {
+    parts.push(
+      `## Expected vs Actual\n**Expected:** ${hasExpected ? bug.expectedBehavior : "(unspecified)"}\n**Actual:** ${hasActual ? bug.actualBehavior : "(unspecified)"}`
+    );
+  }
 
----
-*Reported via Discord by ${userTag}*
-`;
+  if (qa && qa.trim()) parts.push(`## Player Clarifications\n${qa.trim()}`);
+
+  let body = parts.join("\n\n");
+  if (raw && raw.trim()) body += `\n\n---\n**Original Report**\n> ${raw.trim()}`;
+  body += `\n\n*Reported via Discord by ${userTag}*\n`;
+  return body;
 }
