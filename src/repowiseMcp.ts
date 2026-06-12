@@ -18,7 +18,7 @@ export type OpenAiToolDef = {
   function: { name: string; description: string; parameters: Record<string, unknown> };
 };
 
-type McpTool = { name: string; description?: string; inputSchema?: Record<string, unknown> };
+export type McpTool = { name: string; description?: string; inputSchema?: Record<string, unknown> };
 
 export function buildAuthHeaders(env: {
   CF_ACCESS_CLIENT_ID?: string;
@@ -64,7 +64,7 @@ function makeTransport() {
   });
   const requestInit = { headers };
   if (url.pathname.endsWith("/sse")) {
-    return new SSEClientTransport(url, { requestInit, eventSourceInit: { fetch: undefined } as any });
+    return new SSEClientTransport(url, { requestInit });
   }
   return new StreamableHTTPClientTransport(url, { requestInit });
 }
@@ -109,8 +109,8 @@ export async function getOpenAiTools(): Promise<OpenAiToolDef[]> {
 
 /** Call a repowise tool and return its text content (joined). Throws on failure. */
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
-  const client = await getClient();
   try {
+    const client = await getClient();
     const res: any = await client.callTool({ name, arguments: args });
     const content = (res?.content || []) as Array<{ type: string; text?: string }>;
     return content
