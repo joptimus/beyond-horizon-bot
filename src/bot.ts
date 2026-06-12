@@ -508,21 +508,21 @@ client.on(Events.InteractionCreate, async (i) => {
 		}
 
 		if (action === 'approve') {
-				await clearOldPromptComponents(pending);
-				await i.update({ content: 'Posting your idea...', components: [], embeds: [] });
+			await clearOldPromptComponents(pending);
+			await i.update({ content: 'Posting your idea...', components: [], embeds: [] });
 
-				const issue = await postIdeaFromPending(pending, false);
+			const issue = await postIdeaFromPending(pending, false);
 
-				delPending(id);
-				return i.followUp({ content: `Done. Idea #${issue.number} posted.`, ephemeral: true });
-			}
+			delPending(id);
+			return i.followUp({ content: `Done. Idea #${issue.number} posted.`, ephemeral: true });
+		}
 
-			// Cancel
-			if (action === 'cancel') {
-				await clearOldPromptComponents(pending);
-				delPending(id);
-				return i.update({ content: 'Draft **canceled**.', components: [], embeds: [] });
-			}
+		// Cancel
+		if (action === 'cancel') {
+			await clearOldPromptComponents(pending);
+			delPending(id);
+			return i.update({ content: 'Draft **canceled**.', components: [], embeds: [] });
+		}
 		} // end if (ns === 'idea')
 
 		// ----- BUG BUTTONS -----
@@ -917,7 +917,10 @@ function unansweredAppendix(pending: any): string {
 // and a thread notice. `auto` toggles wording for the TTL-expiry path.
 async function postIdeaFromPending(pending: any, auto: boolean) {
 	const body = (pending.body as string) + (auto ? unansweredAppendix(pending) : '');
-	const issue = await createIdeaIssue({ title: pending.title, body });
+	// Idempotency: if a prior (failed-after-GitHub) attempt already filed the issue,
+	// reuse it instead of creating a duplicate when sweepExpired retries.
+	const issue = (pending._postedIssue as any) || await createIdeaIssue({ title: pending.title, body });
+	pending._postedIssue = issue;
 
 	const summary = extractSummaryFromIssueBody(issue.body || '');
 	const desc = summary
@@ -968,7 +971,8 @@ async function postIdeaFromPending(pending: any, auto: boolean) {
 // File a bug issue from a pending draft + thread notice.
 async function postBugFromPending(pending: any, auto: boolean) {
 	const body = (pending.body as string) + (auto ? unansweredAppendix(pending) : '');
-	const issue = await createBugIssue({ title: pending.title, body });
+	const issue = (pending._postedIssue as any) || await createBugIssue({ title: pending.title, body });
+	pending._postedIssue = issue;
 
 	const threadId = pending.threadId || pending.sourceChannelId;
 	const thread = threadId ? await client.channels.fetch(threadId as string).catch(() => null) : null;
