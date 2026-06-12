@@ -39,6 +39,8 @@ import { enrichIdea, toIssueBody } from './ai.js';
 import { enrichBug, toBugIssueBody } from './aiBug.js';
 import { getPending, putPending, delPending, setOnExpire, type PendingIdea } from './pending.js';
 import { findCodePointers } from './aiCodeContext.js';
+import { findPossibleDuplicates, renderDuplicatesBlock } from './dupeCheck.js';
+import { testConnectionOnStartup } from './repowiseMcp.js';
 import type { CodeContext } from './codeContextTypes.js';
 import { getIssueFromVoteMessage, linkVoteMessage } from './votes.js';
 // ---- GitHub helpers (issue + vote sync) ----
@@ -139,6 +141,8 @@ client.once(Events.ClientReady, (c) => {
 		}
 	});
 	startApi(client);
+	// Diagnostic only — never blocks startup; logs CF Access / MCP connectivity.
+	testConnectionOnStartup().catch((err) => console.error('[repowise] startup test crashed:', err));
 });
 
 // Create a public thread off the invoking message (prefix flow)
@@ -361,7 +365,11 @@ client.on(Events.MessageCreate, async (message: Message) => {
 			// prefix commands have no deferReply equivalent.
 			(message.channel as any).sendTyping?.().catch(() => {});
 			const codeContext = await findCodePointers(rawText, 'bug');
-			const enriched = await enrichBug(rawText, submitterTag, { codeContext });
+			const [enriched, dupes] = await Promise.all([
+				enrichBug(rawText, submitterTag, { codeContext }),
+				findPossibleDuplicates(rawText, 'bug'),
+			]);
+			const dupeBlock = renderDuplicatesBlock(dupes);
 			const id = crypto.randomUUID();
 
 			// Create thread for bug report
@@ -384,7 +392,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
 				const qEmbed = new EmbedBuilder()
 					.setTitle(enriched.title || 'Bug Report')
-					.setDescription(`**Draft Summary**\n${enriched.summary}\n\n**Clarifying Questions**\n${questionsList}`)
+					.setDescription(`**Draft Summary**\n${enriched.summary}\n\n**Clarifying Questions**\n${questionsList}${dupeBlock}`)
 					.setColor(0xe11d48);
 
 				const qRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -444,7 +452,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 						`\n**Expected:** ${enriched.expectedBehavior || '(not specified)'}`,
 						`\n**Actual:** ${enriched.actualBehavior || '(not specified)'}`,
 						enriched.frequency ? `\n**Frequency:** ${enriched.frequency}` : '',
-					].join('\n')
+					].join('\n') + dupeBlock
 				)
 				.setColor(0xe11d48);
 

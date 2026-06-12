@@ -145,6 +145,20 @@ export function extractSummaryFromIssueBody(body: string | null | undefined): st
   return raw.replace(/\n{3,}/g, "\n\n").trim();
 }
 
+export async function listOpenIssuesByLabel(label: string) {
+  const res = await octokit.request("GET /repos/{owner}/{repo}/issues", {
+    owner,
+    repo,
+    state: "open",
+    labels: label,
+    per_page: 100,
+  });
+  // The issues endpoint also returns PRs — exclude them.
+  return (res.data as any[])
+    .filter((i) => !i.pull_request)
+    .map((i) => ({ number: i.number as number, title: String(i.title), html_url: String(i.html_url) }));
+}
+
 export async function createBugIssue({ title, body }: { title: string; body: string }) {
   const res = await octokit.request("POST /repos/{owner}/{repo}/issues", {
     owner,

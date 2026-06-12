@@ -9,6 +9,7 @@ import {
 import { enrichBug, toBugIssueBody, EnrichedBug } from "../aiBug.js";
 import { putPending } from "../pending.js";
 import { findCodePointers } from "../aiCodeContext.js";
+import { findPossibleDuplicates, renderDuplicatesBlock } from "../dupeCheck.js";
 import crypto from "node:crypto";
 
 export const data = new SlashCommandBuilder()
@@ -18,7 +19,7 @@ export const data = new SlashCommandBuilder()
     opt.setName("description").setDescription("Describe the bug you encountered").setRequired(true)
   );
 
-function bugPreviewEmbed(bug: EnrichedBug) {
+function bugPreviewEmbed(bug: EnrichedBug, dupeBlock = "") {
   const steps = bug.stepsToReproduce.length
     ? bug.stepsToReproduce.map((s, i) => `${i + 1}. ${s}`).join("\n")
     : "_(not yet specified)_";
@@ -32,7 +33,7 @@ function bugPreviewEmbed(bug: EnrichedBug) {
         `\n**Expected:** ${bug.expectedBehavior || "(not specified)"}`,
         `\n**Actual:** ${bug.actualBehavior || "(not specified)"}`,
         bug.frequency ? `\n**Frequency:** ${bug.frequency}` : "",
-      ].join("\n")
+      ].join("\n") + dupeBlock
     )
     .setColor(0xe11d48);
 }
@@ -50,7 +51,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   const codeContext = await findCodePointers(rawText, "bug");
 
-  const enriched = await enrichBug(rawText, submitterTag, { codeContext });
+  const [enriched, dupes] = await Promise.all([
+    enrichBug(rawText, submitterTag, { codeContext }),
+    findPossibleDuplicates(rawText, "bug"),
+  ]);
+  const dupeBlock = renderDuplicatesBlock(dupes);
 
   const ch = interaction.channel;
   if (!ch || !(ch as any).isTextBased?.()) {
@@ -74,7 +79,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
     const embed = new EmbedBuilder()
       .setTitle(enriched.title || "Bug Report")
-      .setDescription(`**Draft Summary**\n${enriched.summary}\n\n**Clarifying Questions**\n${questionsList}`)
+      .setDescription(`**Draft Summary**\n${enriched.summary}\n\n**Clarifying Questions**\n${questionsList}${dupeBlock}`)
       .setColor(0xe11d48);
 
     const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
@@ -121,7 +126,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     ...({ sourceChannelId: thread.id, threadId: thread.id, parentChannelId: interaction.channelId } as any),
   });
 
-  const embed = bugPreviewEmbed(enriched);
+  const embed = bugPreviewEmbed(enriched, dupeBlock);
 
   const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
     new ButtonBuilder().setCustomId(`bug:approve:${id}`).setLabel("Approve & Post").setStyle(ButtonStyle.Success),

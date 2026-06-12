@@ -107,6 +107,73 @@ export async function getOpenAiTools(): Promise<OpenAiToolDef[]> {
   }
 }
 
+/**
+ * Startup diagnostic. Logs which repowise/CF Access env vars are present (never
+ * the secret values), probes the endpoint with a raw HTTP request to surface
+ * Cloudflare Access verdicts, then attempts a full MCP handshake.
+ */
+export async function testConnectionOnStartup(): Promise<void> {
+  const rawUrl = process.env.REPOWISE_MCP_URL;
+  if (!rawUrl) {
+    console.log("[repowise] REPOWISE_MCP_URL not set — code-context enrichment disabled.");
+    return;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    console.error(`[repowise] REPOWISE_MCP_URL is not a valid URL: "${rawUrl}"`);
+    return;
+  }
+
+  const id = process.env.CF_ACCESS_CLIENT_ID;
+  const secret = process.env.CF_ACCESS_CLIENT_SECRET;
+  const transport = url.pathname.endsWith("/sse") ? "SSE" : "StreamableHTTP";
+  console.log(`[repowise] URL: ${url.origin}${url.pathname} (transport: ${transport})`);
+  console.log(
+    `[repowise] CF-Access-Client-Id: ${id ? `set (${id.slice(0, 8)}…, ${id.length} chars)` : "MISSING"} | ` +
+      `CF-Access-Client-Secret: ${secret ? `set (${secret.length} chars)` : "MISSING"}`
+  );
+  if (!id || !secret) {
+    console.error(
+      "[repowise] CF Access service-token env vars are missing — requests reach Cloudflare Access with no credentials and will be rejected with 403."
+    );
+  }
+
+  // Raw probe: a 403 here is Cloudflare Access rejecting the service token
+  // before the request ever reaches repowise.
+  try {
+    const res = await fetch(url.toString(), {
+      method: "GET",
+      headers: buildAuthHeaders({ CF_ACCESS_CLIENT_ID: id, CF_ACCESS_CLIENT_SECRET: secret }),
+    });
+    res.body?.cancel().catch(() => {});
+    console.log(`[repowise] HTTP probe: ${res.status} ${res.statusText}`);
+    if (res.status === 403) {
+      console.error(
+        "[repowise] 403 = Cloudflare Access rejected the credentials. Check: " +
+          "(1) the service token exists and is not expired/revoked (Zero Trust → Access → Service Tokens), " +
+          "(2) the Access application for this hostname has a policy with action 'Service Auth' that includes this token, " +
+          "(3) the env values carry no surrounding quotes or whitespace."
+      );
+    }
+  } catch (err: any) {
+    console.error(`[repowise] HTTP probe failed before getting a response: ${err?.message || err}`);
+  }
+
+  // Full MCP handshake through the real client path.
+  try {
+    const tools = await listAllowedTools();
+    console.log(
+      `[repowise] MCP connect OK — allowlisted tools: ${tools.map((t) => t.name).join(", ") || "(none matched allowlist)"}`
+    );
+  } catch (err: any) {
+    resetConnection();
+    console.error(`[repowise] MCP connect FAILED: ${String(err?.message || err).slice(0, 300)}`);
+  }
+}
+
 /** Call a repowise tool and return its text content (joined). Throws on failure. */
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
   try {
