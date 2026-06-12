@@ -6,9 +6,13 @@
   "scripts": {
     "dev": "tsx src/bot.ts",
     "build": "tsc -p tsconfig.json",
-    "start": "node dist/bot.js"
+    "start": "node dist/bot.js",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "try:codesearch": "tsx scripts/tryCodeSearch.ts"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "discord.js": "^14.16.3",
     "dotenv": "^16.4.5",
     "express": "^5.2.1",
@@ -22,6 +26,7 @@
     "@types/express": "^5.0.6",
     "@types/node": "^22.7.5",
     "tsx": "^4.19.1",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^4.1.8"
   }
 }
