@@ -24,12 +24,15 @@ export type FindDeps = {
 };
 
 let defaultClient: OpenAI | null = null;
-function getDefaultDeps(): FindDeps {
+function getDefaultClient(): OpenAI {
   if (!defaultClient) defaultClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+  return defaultClient;
+}
+function getDefaultDeps(): FindDeps {
   return {
     getTools: getOpenAiTools,
     callTool,
-    createCompletion: (params) => defaultClient!.chat.completions.create(params) as any,
+    createCompletion: (params) => getDefaultClient().chat.completions.create(params) as any,
     now: () => Date.now(),
     enabled: isRepowiseEnabled(),
   };
