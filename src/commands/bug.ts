@@ -8,6 +8,7 @@ import {
 } from "discord.js";
 import { enrichBug, toBugIssueBody, EnrichedBug } from "../aiBug.js";
 import { putPending } from "../pending.js";
+import { findCodePointers } from "../aiCodeContext.js";
 import crypto from "node:crypto";
 
 export const data = new SlashCommandBuilder()
@@ -47,7 +48,9 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   await interaction.deferReply({ ephemeral: true });
 
-  const enriched = await enrichBug(rawText, submitterTag);
+  const codeContext = await findCodePointers(rawText, "bug");
+
+  const enriched = await enrichBug(rawText, submitterTag, undefined, undefined, codeContext);
 
   const ch = interaction.channel;
   if (!ch || !(ch as any).isTextBased?.()) {
@@ -91,11 +94,12 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       authorId: interaction.user.id,
       rawText,
       title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-      body: toBugIssueBody(enriched, submitterTag),
+      body: toBugIssueBody(enriched, submitterTag, rawText, undefined, codeContext),
       createdAt: Date.now(),
       openQuestions: enriched.openQuestions.slice(0, 3),
       phase: "awaiting_answers",
       ...({ enriched } as any),
+      ...({ codeContext } as any),
       ...({ sourceMessageId: promptMsg.id, sourceChannelId: thread.id, threadId: thread.id, parentChannelId: interaction.channelId } as any),
     });
 
@@ -109,10 +113,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     authorId: interaction.user.id,
     rawText,
     title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-    body: toBugIssueBody(enriched, submitterTag),
+    body: toBugIssueBody(enriched, submitterTag, rawText, undefined, codeContext),
     createdAt: Date.now(),
     phase: "awaiting_approval",
     ...({ enriched } as any),
+    ...({ codeContext } as any),
     ...({ sourceChannelId: thread.id, threadId: thread.id, parentChannelId: interaction.channelId } as any),
   });
 

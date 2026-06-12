@@ -8,6 +8,7 @@ import {
 } from "discord.js";
 import { enrichIdea, toIssueBody, Enriched } from "../ai.js";
 import { putPending } from "../pending.js";
+import { findCodePointers } from "../aiCodeContext.js";
 import crypto from "node:crypto";
 
 export const data = new SlashCommandBuilder()
@@ -53,8 +54,10 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   // Ephemeral pointer while we work + create a thread
   await interaction.deferReply({ ephemeral: true });
 
+  const codeContext = await findCodePointers(rawText, "idea");
+
   // First pass enrichment
-  const enriched = await enrichIdea(rawText, submitterTag);
+  const enriched = await enrichIdea(rawText, submitterTag, undefined, undefined, codeContext);
 
   // Create (or fail gracefully) a thread in the current channel
   const ch = interaction.channel;
@@ -103,11 +106,12 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       authorId: interaction.user.id,
       rawText,
       title: `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`,
-      body: toIssueBody(enriched, submitterTag, interaction.user.id, rawText),
+      body: toIssueBody(enriched, submitterTag, interaction.user.id, rawText, undefined, codeContext),
       createdAt: Date.now(),
       openQuestions: enriched.openQuestions.slice(0, 5),
       phase: "awaiting_answers",
       ...( { enriched } as any ),
+      ...( { codeContext } as any ),
       ...( { sourceMessageId: promptMsg.id, sourceChannelId: thread.id, threadId: thread.id } as any ),
         ...( { parentChannelId: interaction.channelId } as any ),
     });
@@ -126,10 +130,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     authorId: interaction.user.id,
     rawText,
     title: `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`,
-    body: toIssueBody(enriched, submitterTag, interaction.user.id, rawText),
+    body: toIssueBody(enriched, submitterTag, interaction.user.id, rawText, undefined, codeContext),
     createdAt: Date.now(),
     phase: "awaiting_approval",
     ...( { enriched } as any ),
+    ...( { codeContext } as any ),
     ...( { sourceChannelId: thread.id, threadId: thread.id } as any ),
       ...( { parentChannelId: interaction.channelId } as any ),
   });
