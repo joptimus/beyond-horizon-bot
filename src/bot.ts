@@ -488,6 +488,11 @@ client.on(Events.InteractionCreate, async (i) => {
 	}
 });
 
+// Discord caps text-input placeholders at 100 chars
+function toPlaceholder(text: string): string {
+	return text.length > 100 ? `${text.slice(0, 99)}…` : text;
+}
+
 async function handleComponentInteraction(i: Interaction) {
 	// ----- BUTTONS -----
 	if (i.isButton()) {
@@ -516,7 +521,7 @@ async function handleComponentInteraction(i: Interaction) {
 					.setLabel(`Q${idx + 1}`) // <= short label (Discord limit is ~45 chars)
 					.setStyle(TextInputStyle.Paragraph)
 					.setRequired(false)
-					.setPlaceholder(q) // <= full question visible here
+					.setPlaceholder(toPlaceholder(q)) // <= full question visible here
 					.setMaxLength(1000); // optional: allow longer answers
 
 				modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
@@ -594,7 +599,7 @@ async function handleComponentInteraction(i: Interaction) {
 						.setLabel(`Q${idx + 1}`)
 						.setStyle(TextInputStyle.Paragraph)
 						.setRequired(false)
-						.setPlaceholder(q)
+						.setPlaceholder(toPlaceholder(q))
 						.setMaxLength(1000);
 
 					modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
