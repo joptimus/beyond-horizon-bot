@@ -13,8 +13,8 @@ type ChatMessage = OpenAI.Chat.Completions.ChatCompletionCreateParams["messages"
 
 const SYSTEM_PREFACE = `
 You are assisting a small team building a persistent, space-based MMO/RTS in Unity with a Node.js backend.
-Your task is to help structure bug reports from players into clear, actionable format for developers.
-Focus on extracting reproduction steps, expected vs actual behavior, and frequency.
+Your task is to structure player bug reports into a clear, actionable format for developers.
+Use any provided code context to focus on what's unknown; do not nag players for exact repro steps the code already localizes.
 `;
 
 const JSON_SHAPE = `
@@ -29,20 +29,25 @@ Return ONLY valid JSON with this exact shape:
   "openQuestions": ["Up to 3 clarifying questions about reproduction"]
 }
 Rules:
-- Focus questions on reproduction: steps, frequency, conditions
-- If reproduction steps are unclear, ask about them
-- Keep openQuestions to at most 3
+- Ask only what neither the report nor the code context reveals: in-game conditions, player intent, expected outcome.
+- Do NOT demand exact reproduction steps when code context narrows the area; prefer discriminating questions.
+- Phrase questions in player terms, never code terms (no file/function names).
+- Keep openQuestions to at most 3; ask none if the report + code suffice.
 - Output only JSON
 `;
 
-function firstPassPrompt(raw: string, author: string) {
+function codeContextBlock(codeContext?: { whereToStart: unknown[]; suspectedCause?: string | null; affectedSystems: string[]; confidence: string } | null): string {
+  if (!codeContext || !codeContext.whereToStart?.length) return "";
+  return `\n<codeContext>\n${JSON.stringify(codeContext, null, 2)}\n</codeContext>\nUse this to avoid asking what the code already reveals.\n`;
+}
+
+function firstPassPrompt(raw: string, author: string, codeCtxBlock: string) {
   return `
 Given the bug report below, produce a structured bug report as JSON.
-- Extract any reproduction steps mentioned
-- Identify expected vs actual behavior (may be implicit)
-- Note frequency if mentioned
-- Ask up to 3 questions to clarify reproduction details
-
+- Extract any reproduction steps the player actually mentioned (do not invent).
+- Identify expected vs actual behavior (may be implicit).
+- Note frequency if mentioned.
+${codeCtxBlock}
 <author>${author}</author>
 
 ${JSON_SHAPE}
@@ -52,11 +57,11 @@ Bug report:
 `;
 }
 
-function secondPassPrompt(raw: string, answers: string, author: string, previousJSON: string) {
+function secondPassPrompt(raw: string, answers: string, author: string, previousJSON: string, codeCtxBlock: string) {
   return `
 Refine the bug report based on player clarifications.
 Remove any openQuestions that are now answered.
-
+${codeCtxBlock}
 Existing bug report JSON:
 \`\`\`json
 ${previousJSON}
@@ -122,12 +127,14 @@ export async function enrichBug(
   rawText: string,
   author: string,
   answersText?: string,
-  previous?: EnrichedBug
+  previous?: EnrichedBug,
+  codeContext?: CodeContext | null
 ): Promise<EnrichedBug> {
   const previousJSON = previous ? JSON.stringify(previous, null, 2) : "{}";
+  const codeCtxBlock = codeContextBlock(codeContext);
   const userPrompt = answersText
-    ? secondPassPrompt(rawText, answersText, author, previousJSON)
-    : firstPassPrompt(rawText, author);
+    ? secondPassPrompt(rawText, answersText, author, previousJSON, codeCtxBlock)
+    : firstPassPrompt(rawText, author, codeCtxBlock);
 
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PREFACE },

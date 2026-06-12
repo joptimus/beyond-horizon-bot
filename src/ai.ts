@@ -47,28 +47,45 @@ Rules:
 - Output only JSON.
 `;
 
+const QUESTION_RULES = `
+Question quality rules:
+- Ask ONLY what neither the report nor the code context can answer: player intent,
+  in-game conditions (ship class, fleet size, location type, economy state), expected outcomes.
+- Never ask for exact reproduction steps when the code context already narrows the area;
+  ask discriminating questions instead (e.g. "in-system or jump-gate warp?").
+- Phrase questions in player terms (game concepts) — never code terms (no file names,
+  function names, or jargon).
+- Cap at 2-3 questions; ask none if the report + code context suffice.
+`;
+
+function codeContextBlock(codeContext?: { whereToStart: unknown[]; suspectedCause?: string | null; affectedSystems: string[]; confidence: string } | null): string {
+  if (!codeContext || !codeContext.whereToStart?.length) return "";
+  return `\n<codeContext>\n${JSON.stringify(codeContext, null, 2)}\n</codeContext>\nUse this to avoid asking what the code already reveals.\n`;
+}
+
 // ---- Prompt builders ----
-function firstPassPrompt(raw: string, author: string) {
+function firstPassPrompt(raw: string, author: string, codeCtxBlock: string) {
   return `
 Given the raw player idea below, produce a concise, developer-ready design note as JSON.
 - Fill "scope.client" / "scope.server" with concrete work items (or ["None"]).
 - Set "scope.database" to specific changes or ["No changes"].
 - Ask at most 2 openQuestions only if helpful; otherwise [].
-
+${codeCtxBlock}
 <author>${author}</author>
 
 ${JSON_SHAPE}
+${QUESTION_RULES}
 
 Raw player idea:
 """${raw}"""
 `;
 }
 
-function secondPassPrompt(raw: string, answers: string, author: string, previousJSON: string) {
+function secondPassPrompt(raw: string, answers: string, author: string, previousJSON: string, codeCtxBlock: string) {
   return `
 Your task is to refine the existing design note based on player clarifications.
 Keep **openQuestions** to **at most 2**, and remove any that are now answered.
-
+${codeCtxBlock}
 Here is the existing structured design note JSON:
 \`\`\`json
 ${previousJSON}
@@ -92,6 +109,7 @@ CRITICAL REQUIREMENTS:
 Return JSON in this shape:
 
 ${JSON_SHAPE}
+${QUESTION_RULES}
 
 Original raw idea:
 """${raw}"""
@@ -191,12 +209,14 @@ export async function enrichIdea(
   rawText: string,
   author: string,
   answersText?: string,
-  previous?: Enriched
+  previous?: Enriched,
+  codeContext?: CodeContext | null
 ): Promise<Enriched> {
   const previousJSON = previous ? JSON.stringify(previous, null, 2) : "{}";
+  const codeCtxBlock = codeContextBlock(codeContext);
   const userPrompt = answersText
-    ? secondPassPrompt(rawText, answersText, author, previousJSON)
-    : firstPassPrompt(rawText, author);
+    ? secondPassPrompt(rawText, answersText, author, previousJSON, codeCtxBlock)
+    : firstPassPrompt(rawText, author, codeCtxBlock);
 
   const messages: ChatMessage[] = [
     { role: "system", content: SYSTEM_PREFACE },
@@ -217,7 +237,6 @@ export async function enrichIdea(
     return sanitize(JSON.parse(stripFences(content)), rawText);
   } catch (err2) {
     console.error("[AI] JSON parse failed (try 2). Raw content:", content);
-    // Fallback: keep prior draft if provided; otherwise minimal from raw
     return sanitize(previous ?? {}, rawText);
   }
 }
