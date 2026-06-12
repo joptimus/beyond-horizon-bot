@@ -2,12 +2,7 @@
 import OpenAI from "openai";
 import type { CodeContext } from "./codeContextTypes.js";
 import { renderWhereToStart } from "./codeContextTypes.js";
-
-const API_KEY = process.env.OPENAI_API_KEY;
-if (!API_KEY) throw new Error("Missing OPENAI_API_KEY in .env");
-
-const client = new OpenAI({ apiKey: API_KEY });
-const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+import { getOpenAiClient, OPENAI_MODEL, stripFences, codeContextBlock } from "./aiShared.js";
 
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionCreateParams["messages"][number];
 
@@ -35,11 +30,6 @@ Rules:
 - Keep openQuestions to at most 3; ask none if the report + code suffice.
 - Output only JSON
 `;
-
-function codeContextBlock(codeContext?: { whereToStart: unknown[]; suspectedCause?: string | null; affectedSystems: string[]; confidence: string } | null): string {
-  if (!codeContext || !codeContext.whereToStart?.length) return "";
-  return `\n<codeContext>\n${JSON.stringify(codeContext, null, 2)}\n</codeContext>\nUse this to avoid asking what the code already reveals.\n`;
-}
 
 function firstPassPrompt(raw: string, author: string, codeCtxBlock: string) {
   return `
@@ -93,10 +83,6 @@ export type EnrichedBug = {
   openQuestions: string[];
 };
 
-function stripFences(s: string) {
-  return s.replace(/```(?:json)?\s*|```/gi, "").trim();
-}
-
 function toArray(x: unknown): string[] {
   return Array.isArray(x) ? x.filter(Boolean).map(String) : [];
 }
@@ -114,8 +100,8 @@ function sanitize(e: Partial<EnrichedBug>, raw: string): EnrichedBug {
 }
 
 async function callOnce(messages: ChatMessage[]) {
-  const res = await client.chat.completions.create({
-    model: MODEL,
+  const res = await getOpenAiClient().chat.completions.create({
+    model: OPENAI_MODEL,
     temperature: 0.2,
     response_format: { type: "json_object" } as any,
     messages,
@@ -123,13 +109,18 @@ async function callOnce(messages: ChatMessage[]) {
   return res.choices[0]?.message?.content || "{}";
 }
 
+export type EnrichBugOpts = {
+  answersText?: string;
+  previous?: EnrichedBug;
+  codeContext?: CodeContext | null;
+};
+
 export async function enrichBug(
   rawText: string,
   author: string,
-  answersText?: string,
-  previous?: EnrichedBug,
-  codeContext?: CodeContext | null
+  opts: EnrichBugOpts = {}
 ): Promise<EnrichedBug> {
+  const { answersText, previous, codeContext } = opts;
   const previousJSON = previous ? JSON.stringify(previous, null, 2) : "{}";
   const codeCtxBlock = codeContextBlock(codeContext);
   const userPrompt = answersText
@@ -159,13 +150,18 @@ export async function enrichBug(
   }
 }
 
+export type BugIssueBodyOpts = {
+  raw?: string;
+  qa?: string;
+  codeContext?: CodeContext | null;
+};
+
 export function toBugIssueBody(
   bug: EnrichedBug,
   userTag: string,
-  raw?: string,
-  qa?: string,
-  codeContext?: CodeContext | null
+  opts: BugIssueBodyOpts = {}
 ): string {
+  const { raw, qa, codeContext } = opts;
   const parts: string[] = [];
 
   parts.push(`## Summary\n${bug.summary}`);

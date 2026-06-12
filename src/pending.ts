@@ -32,27 +32,27 @@ let onExpireCb: OnExpire | undefined;
 export function setOnExpire(cb: OnExpire | undefined) { onExpireCb = cb; }
 
 /**
- * Sweep expired drafts. For each one past TTL: invoke onExpire (auto-file),
- * retry once on failure, then delete regardless (so the map never grows
- * unbounded). Drafts within TTL are untouched.
+ * Sweep expired drafts. Expired entries are claimed synchronously (deleted
+ * before any await) so a concurrent sweep tick — or an Approve click racing
+ * the sweep — can never process the same draft twice. onExpire (auto-file)
+ * then runs per claimed draft; retries and user notification on failure are
+ * the callback's responsibility.
  */
 export async function sweepExpired(now: number, onExpire?: OnExpire) {
   const cb = onExpire ?? onExpireCb;
+  const expired: PendingIdea[] = [];
   for (const [id, p] of PENDING.entries()) {
     if (now - p.createdAt <= TTL_MS) continue;
-    if (cb) {
-      try {
-        await cb(p);
-      } catch (err1) {
-        console.warn(`[pending] onExpire failed for ${id}, retrying once:`, err1);
-        try {
-          await cb(p);
-        } catch (err2) {
-          console.warn(`[pending] onExpire retry failed for ${id}, dropping draft:`, err2);
-        }
-      }
-    }
     PENDING.delete(id);
+    expired.push(p);
+  }
+  if (!cb) return;
+  for (const p of expired) {
+    try {
+      await cb(p);
+    } catch (err) {
+      console.warn(`[pending] onExpire failed for ${p.id}, dropping draft:`, err);
+    }
   }
 }
 

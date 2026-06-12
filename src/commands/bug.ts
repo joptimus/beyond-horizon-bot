@@ -50,7 +50,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   const codeContext = await findCodePointers(rawText, "bug");
 
-  const enriched = await enrichBug(rawText, submitterTag, undefined, undefined, codeContext);
+  const enriched = await enrichBug(rawText, submitterTag, { codeContext });
 
   const ch = interaction.channel;
   if (!ch || !(ch as any).isTextBased?.()) {
@@ -94,12 +94,12 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       authorId: interaction.user.id,
       rawText,
       title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-      body: toBugIssueBody(enriched, submitterTag, rawText, undefined, codeContext),
+      body: toBugIssueBody(enriched, submitterTag, { raw: rawText, codeContext }),
       createdAt: Date.now(),
       openQuestions: enriched.openQuestions.slice(0, 3),
       phase: "awaiting_answers",
+      codeContext,
       ...({ enriched } as any),
-      ...({ codeContext } as any),
       ...({ sourceMessageId: promptMsg.id, sourceChannelId: thread.id, threadId: thread.id, parentChannelId: interaction.channelId } as any),
     });
 
@@ -113,11 +113,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     authorId: interaction.user.id,
     rawText,
     title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-    body: toBugIssueBody(enriched, submitterTag, rawText, undefined, codeContext),
+    body: toBugIssueBody(enriched, submitterTag, { raw: rawText, codeContext }),
     createdAt: Date.now(),
     phase: "awaiting_approval",
+    codeContext,
     ...({ enriched } as any),
-    ...({ codeContext } as any),
     ...({ sourceChannelId: thread.id, threadId: thread.id, parentChannelId: interaction.channelId } as any),
   });
 

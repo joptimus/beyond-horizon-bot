@@ -3,12 +3,14 @@ import 'dotenv/config';
 import {
 	ActionRowBuilder,
 	ButtonBuilder,
+	ButtonInteraction,
 	ButtonStyle,
 	Client,
 	EmbedBuilder,
 	Events,
 	GatewayIntentBits,
 	GuildMember,
+	Interaction,
 	Message,
 	MessageReaction,
 	MessageReactionEventDetails,
@@ -116,15 +118,27 @@ function buildVerifyButton(): ActionRowBuilder<ButtonBuilder> {
 
 client.once(Events.ClientReady, (c) => {
 	console.log(`🤖 Logged in as ${c.user.tag}`);
-	startApi(client);
+	// Register the expiry handler before startApi so a startup failure there can
+	// never leave the sweep silently dropping drafts without auto-filing them.
 	setOnExpire(async (draft: PendingIdea) => {
 		// Auto-file drafts that reached a usable state. Both phases qualify per spec.
-		if (draft.type === 'bug') {
-			await postBugFromPending(draft, true);
-		} else {
-			await postIdeaFromPending(draft, true);
+		// Only issue creation can throw (Discord side effects are best-effort inside
+		// the helpers), so one retry covers a transient GitHub failure; after that,
+		// tell the user their draft was lost instead of failing silently.
+		const post = () => (draft.type === 'bug' ? postBugFromPending(draft, true) : postIdeaFromPending(draft, true));
+		try {
+			await post();
+		} catch (err) {
+			log.warn(`[expiry] auto-file failed for ${draft.id}, retrying once:`, err);
+			try {
+				await post();
+			} catch (err2) {
+				log.error(`[expiry] auto-file retry failed for ${draft.id}, draft dropped:`, err2);
+				await notifyDraftThread(draft, '⚠️ This draft expired and auto-filing it to GitHub failed. Please re-submit it.');
+			}
 		}
 	});
+	startApi(client);
 });
 
 // Create a public thread off the invoking message (prefix flow)
@@ -191,9 +205,12 @@ client.on(Events.MessageCreate, async (message: Message) => {
 			if (!rawText) return message.reply('❗ Usage: `!idea <your idea>`');
 
 			const submitterTag = `${message.author.username}#${message.author.discriminator}`;
+			// Acknowledge right away — code search + enrichment can take 20s+ and
+			// prefix commands have no deferReply equivalent.
+			(message.channel as any).sendTyping?.().catch(() => {});
 			// 1) First pass enrichment
 			const codeContext = await findCodePointers(rawText, 'idea');
-			const enriched = await enrichIdea(rawText, submitterTag, undefined, undefined, codeContext);
+			const enriched = await enrichIdea(rawText, submitterTag, { codeContext });
 			const id = crypto.randomUUID();
 
 			// 2) If questions exist → ask to Answer or Skip (inside a thread)
@@ -230,7 +247,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 					authorId: message.author.id,
 					rawText,
 					title: `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`,
-					body: toIssueBody(enriched, submitterTag, message.author.id, rawText, undefined, codeContext),
+					body: toIssueBody(enriched, submitterTag, message.author.id, rawText, { codeContext }),
 					codeContext,
 					createdAt: Date.now(),
 					openQuestions: enriched.openQuestions.slice(0, 5),
@@ -251,7 +268,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 				authorId: message.author.id,
 				rawText,
 				title: `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`,
-				body: toIssueBody(enriched, submitterTag, message.author.id, rawText, undefined, codeContext),
+				body: toIssueBody(enriched, submitterTag, message.author.id, rawText, { codeContext }),
 				codeContext,
 				createdAt: Date.now(),
 				phase: 'awaiting_approval',
@@ -340,8 +357,11 @@ client.on(Events.MessageCreate, async (message: Message) => {
 			if (!rawText) return message.reply('❗ Usage: `!bug <description>`');
 
 			const submitterTag = message.author.tag;
+			// Acknowledge right away — code search + enrichment can take 20s+ and
+			// prefix commands have no deferReply equivalent.
+			(message.channel as any).sendTyping?.().catch(() => {});
 			const codeContext = await findCodePointers(rawText, 'bug');
-			const enriched = await enrichBug(rawText, submitterTag, undefined, undefined, codeContext);
+			const enriched = await enrichBug(rawText, submitterTag, { codeContext });
 			const id = crypto.randomUUID();
 
 			// Create thread for bug report
@@ -384,7 +404,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 					authorId: message.author.id,
 					rawText,
 					title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-					body: toBugIssueBody(enriched, submitterTag, rawText, undefined, codeContext),
+					body: toBugIssueBody(enriched, submitterTag, { raw: rawText, codeContext }),
 					codeContext,
 					createdAt: Date.now(),
 					openQuestions: enriched.openQuestions.slice(0, 3),
@@ -403,7 +423,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 				authorId: message.author.id,
 				rawText,
 				title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-				body: toBugIssueBody(enriched, submitterTag, rawText, undefined, codeContext),
+				body: toBugIssueBody(enriched, submitterTag, { raw: rawText, codeContext }),
 				codeContext,
 				createdAt: Date.now(),
 				phase: 'awaiting_approval',
@@ -453,6 +473,22 @@ client.on(Events.MessageCreate, async (message: Message) => {
 // Buttons + Modal flow (Answer / Skip / Approve / Cancel)
 // =========================================
 client.on(Events.InteractionCreate, async (i) => {
+	// Without this catch, a rejection (GitHub/OpenAI outage mid-flow) becomes an
+	// unhandled promise rejection — fatal on Node 18 defaults — and the user is
+	// left staring at a stripped-button "Posting..." message.
+	try {
+		await handleComponentInteraction(i);
+	} catch (e: any) {
+		log.error('[INTERACTION] Component handler failed:', e);
+		if (i.isRepliable()) {
+			const msg = { content: `❌ Something went wrong: ${e?.message || String(e)}`, ephemeral: true };
+			if (i.deferred || i.replied) await i.followUp(msg).catch(() => {});
+			else await i.reply(msg).catch(() => {});
+		}
+	}
+});
+
+async function handleComponentInteraction(i: Interaction) {
 	// ----- BUTTONS -----
 	if (i.isButton()) {
 		const [ns, action, id] = i.customId.split(':');
@@ -462,7 +498,7 @@ client.on(Events.InteractionCreate, async (i) => {
 		if (ns === 'idea') {
 			log.debug(`[BUTTON] Processing idea button: action=${action}, id=${id}`);
 		const pending = getPending(id);
-		if (!pending) return i.reply({ content: '❌ This draft expired. Please try again.', ephemeral: true });
+		if (!pending) return i.reply({ content: '⌛ This draft is no longer pending — it expired (expired drafts are auto-filed to GitHub; check the thread) or was already posted.', ephemeral: true });
 		if (i.user.id !== pending.authorId) {
 			return i.reply({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
 		}
@@ -508,13 +544,25 @@ client.on(Events.InteractionCreate, async (i) => {
 		}
 
 		if (action === 'approve') {
+			// Claim the draft before any await so the expiry sweep can't file it concurrently.
+			delPending(id);
 			await clearOldPromptComponents(pending);
 			await i.update({ content: 'Posting your idea...', components: [], embeds: [] });
 
-			const issue = await postIdeaFromPending(pending, false);
-
-			delPending(id);
-			return i.followUp({ content: `Done. Idea #${issue.number} posted.`, ephemeral: true });
+			try {
+				const issue = await postIdeaFromPending(pending, false, i);
+				return i.followUp({ content: `Done. Idea #${issue.number} posted.`, ephemeral: true });
+			} catch (err) {
+				log.error('[BUTTON] idea approve failed:', err);
+				// Hand the draft back with a fresh TTL so the user can retry (or expiry auto-files it).
+				pending.createdAt = Date.now();
+				putPending(pending);
+				const retryRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+					new ButtonBuilder().setCustomId(`idea:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+					new ButtonBuilder().setCustomId(`idea:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+				);
+				return i.editReply({ content: '⚠️ Posting to GitHub failed. Try again below.', components: [retryRow] }).catch(() => {});
+			}
 		}
 
 		// Cancel
@@ -528,7 +576,7 @@ client.on(Events.InteractionCreate, async (i) => {
 		// ----- BUG BUTTONS -----
 		if (ns === 'bug') {
 			const pending = getPending(id);
-			if (!pending) return i.reply({ content: '❌ This draft expired. Please try again.', ephemeral: true });
+			if (!pending) return i.reply({ content: '⌛ This draft is no longer pending — it expired (expired drafts are auto-filed to GitHub; check the thread) or was already posted.', ephemeral: true });
 			if (i.user.id !== pending.authorId) {
 				return i.reply({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
 			}
@@ -575,13 +623,25 @@ client.on(Events.InteractionCreate, async (i) => {
 
 			// Approve → Create GitHub issue with bug label
 			if (action === 'approve') {
+				// Claim the draft before any await so the expiry sweep can't file it concurrently.
+				delPending(id);
 				await clearOldPromptComponents(pending);
 				await i.update({ content: 'Posting your bug report…', components: [], embeds: [] });
 
-				const issue = await postBugFromPending(pending, false);
-
-				delPending(id);
-				return i.followUp({ content: `Done. Bug #${issue.number} posted.`, ephemeral: true });
+				try {
+					const issue = await postBugFromPending(pending, false);
+					return i.followUp({ content: `Done. Bug #${issue.number} posted.`, ephemeral: true });
+				} catch (err) {
+					log.error('[BUTTON] bug approve failed:', err);
+					// Hand the draft back with a fresh TTL so the user can retry (or expiry auto-files it).
+					pending.createdAt = Date.now();
+					putPending(pending);
+					const retryRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+						new ButtonBuilder().setCustomId(`bug:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+						new ButtonBuilder().setCustomId(`bug:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+					);
+					return i.editReply({ content: '⚠️ Posting to GitHub failed. Try again below.', components: [retryRow] }).catch(() => {});
+				}
 			}
 
 			// Cancel
@@ -623,9 +683,9 @@ client.on(Events.InteractionCreate, async (i) => {
 			// We might need to reply regardless; handle gracefully
 			if (!pending) {
 				if (!i.replied && !i.deferred) {
-					return i.reply({ content: '❌ This draft expired.', ephemeral: true });
+					return i.reply({ content: '⌛ This draft expired before you submitted — it was auto-filed to GitHub with the info we had. Check the thread for the link.', ephemeral: true });
 				}
-				return i.followUp({ content: '❌ This draft expired.', ephemeral: true });
+				return i.followUp({ content: '⌛ This draft expired before you submitted — it was auto-filed to GitHub with the info we had. Check the thread for the link.', ephemeral: true });
 			}
 			if (i.user.id !== pending.authorId) {
 				if (!i.replied && !i.deferred) {
@@ -655,15 +715,27 @@ client.on(Events.InteractionCreate, async (i) => {
 			const submitterTag = i.user.tag;
 			const previous = (pending as any).enriched || undefined;
 			const codeContext = ((pending as any).codeContext as CodeContext | null) || null;
-			const enriched2 = await enrichIdea((pending as any).rawText, submitterTag, answersText, previous, codeContext);
+			const enriched2 = await enrichIdea((pending as any).rawText, submitterTag, { answersText, previous, codeContext });
+
+			// The sweep may have claimed and auto-filed this draft while we were
+			// re-enriching; re-inserting it would resurrect a stale, already-filed copy.
+			if (getPending(id) !== pending) {
+				return i.editReply({
+					content: '⌛ This draft expired while you were answering and was auto-filed to GitHub — check the thread for the issue link.',
+					embeds: [],
+					components: [],
+				});
+			}
 
 			const finalTitle = `[IDEA] ${(enriched2.title || (pending as any).rawText).slice(0, 80)}`;
-			const finalBody = toIssueBody(enriched2, submitterTag, i.user.id, (pending as any).rawText, answersText, codeContext);
+			const finalBody = toIssueBody(enriched2, submitterTag, i.user.id, (pending as any).rawText, { qa: answersText, codeContext });
 
 			(pending as any).title = finalTitle;
 			(pending as any).body = finalBody;
 			(pending as any).phase = 'awaiting_approval';
 			(pending as any).enriched = enriched2; // keep latest structured JSON
+			pending.answersText = answersText; // answered — suppresses the expiry "unanswered" appendix
+			pending.openQuestions = [];
 			putPending(pending);
 
 			const impl2 =
@@ -705,9 +777,9 @@ client.on(Events.InteractionCreate, async (i) => {
 			const pending = getPending(id);
 			if (!pending) {
 				if (!i.replied && !i.deferred) {
-					return i.reply({ content: '❌ This draft expired.', ephemeral: true });
+					return i.reply({ content: '⌛ This draft expired before you submitted — it was auto-filed to GitHub with the info we had. Check the thread for the link.', ephemeral: true });
 				}
-				return i.followUp({ content: '❌ This draft expired.', ephemeral: true });
+				return i.followUp({ content: '⌛ This draft expired before you submitted — it was auto-filed to GitHub with the info we had. Check the thread for the link.', ephemeral: true });
 			}
 			if (i.user.id !== pending.authorId) {
 				if (!i.replied && !i.deferred) {
@@ -736,15 +808,27 @@ client.on(Events.InteractionCreate, async (i) => {
 			const submitterTag = i.user.tag;
 			const previous = (pending as any).enriched || undefined;
 			const codeContext = ((pending as any).codeContext as CodeContext | null) || null;
-			const enriched2 = await enrichBug((pending as any).rawText, submitterTag, answersText, previous, codeContext);
+			const enriched2 = await enrichBug((pending as any).rawText, submitterTag, { answersText, previous, codeContext });
+
+			// The sweep may have claimed and auto-filed this draft while we were
+			// re-enriching; re-inserting it would resurrect a stale, already-filed copy.
+			if (getPending(id) !== pending) {
+				return i.editReply({
+					content: '⌛ This draft expired while you were answering and was auto-filed to GitHub — check the thread for the issue link.',
+					embeds: [],
+					components: [],
+				});
+			}
 
 			const finalTitle = `[BUG] ${(enriched2.title || (pending as any).rawText).slice(0, 80)}`;
-			const finalBody = toBugIssueBody(enriched2, submitterTag, (pending as any).rawText, answersText, codeContext);
+			const finalBody = toBugIssueBody(enriched2, submitterTag, { raw: (pending as any).rawText, qa: answersText, codeContext });
 
 			(pending as any).title = finalTitle;
 			(pending as any).body = finalBody;
 			(pending as any).phase = 'awaiting_approval';
 			(pending as any).enriched = enriched2;
+			pending.answersText = answersText; // answered — suppresses the expiry "unanswered" appendix
+			pending.openQuestions = [];
 			putPending(pending);
 
 			const steps = enriched2.stepsToReproduce.length
@@ -883,7 +967,7 @@ client.on(Events.InteractionCreate, async (i) => {
 			}
 		}
 	}
-});
+}
 
 async function clearOldPromptComponents(pending: any) {
 	try {
@@ -913,22 +997,46 @@ function unansweredAppendix(pending: any): string {
 	return `\n\n## Open Questions (unanswered)\n${lines}`;
 }
 
-// File an idea issue from a pending draft. Posts the vote embed + reaction sync,
-// and a thread notice. `auto` toggles wording for the TTL-expiry path.
-async function postIdeaFromPending(pending: any, auto: boolean) {
+// Create the GitHub issue exactly once per draft. The approve-retry and
+// expiry-retry paths re-run the whole post helper, so a previously created
+// issue is reused instead of duplicated.
+async function fileIssueOnce(pending: any, auto: boolean, create: (p: { title: string; body: string }) => Promise<any>) {
+	if (pending._postedIssue) return pending._postedIssue;
 	const body = (pending.body as string) + (auto ? unansweredAppendix(pending) : '');
-	// Idempotency: if a prior (failed-after-GitHub) attempt already filed the issue,
-	// reuse it instead of creating a duplicate when sweepExpired retries.
-	const issue = (pending._postedIssue as any) || await createIdeaIssue({ title: pending.title, body });
+	const issue = await create({ title: pending.title, body });
 	pending._postedIssue = issue;
+	return issue;
+}
+
+async function resolveDraftThread(pending: any) {
+	const threadId = pending.threadId || pending.sourceChannelId;
+	return threadId ? await client.channels.fetch(threadId as string).catch(() => null) : null;
+}
+
+async function sendThreadNotice(thread: any, text: string) {
+	if (thread && thread.isTextBased?.()) {
+		await thread.send(text).catch((err: unknown) => console.warn('thread notice failed:', err));
+	}
+}
+
+async function notifyDraftThread(pending: any, text: string) {
+	await sendThreadNotice(await resolveDraftThread(pending), text);
+}
+
+// File an idea issue from a pending draft. Posts the vote embed + reaction sync,
+// and a thread notice. `auto` toggles wording for the TTL-expiry path; `interaction`
+// (approve path only) is the last-resort destination for the vote embed.
+// Everything after issue creation is best-effort: a throw there would make the
+// retry paths re-post embeds/notices for an issue that already exists.
+async function postIdeaFromPending(pending: any, auto: boolean, interaction?: ButtonInteraction) {
+	const issue = await fileIssueOnce(pending, auto, createIdeaIssue);
 
 	const summary = extractSummaryFromIssueBody(issue.body || '');
 	const desc = summary
 		? `**Summary**\n${summary}\n\nReact with 👍 to vote.`
 		: `**Summary**\n_(no summary found in issue body)_\n\nReact with 👍 to vote.`;
 
-	const threadId = pending.threadId || pending.sourceChannelId;
-	const thread = threadId ? await client.channels.fetch(threadId as string).catch(() => null) : null;
+	const thread = await resolveDraftThread(pending);
 
 	let parentChannel: any = null;
 	try {
@@ -948,40 +1056,43 @@ async function postIdeaFromPending(pending: any, auto: boolean) {
 		.setColor(0x00ae86);
 
 	let voteMsg: Message | null = null;
-	if (parentChannel && (parentChannel as any).isTextBased?.()) {
-		voteMsg = await (parentChannel as any).send({ embeds: [voteEmbed] });
-	} else if (thread && (thread as any).isTextBased?.()) {
-		voteMsg = await (thread as any).send({ embeds: [voteEmbed] });
+	try {
+		if (parentChannel && (parentChannel as any).isTextBased?.()) {
+			voteMsg = await (parentChannel as any).send({ embeds: [voteEmbed] });
+		} else if (thread && (thread as any).isTextBased?.()) {
+			voteMsg = await (thread as any).send({ embeds: [voteEmbed] });
+		} else if (interaction) {
+			voteMsg = (await interaction.followUp({ embeds: [voteEmbed] })) as Message;
+		}
+	} catch (err) {
+		console.warn('postIdeaFromPending: vote embed post failed:', err);
 	}
-	if (voteMsg && typeof (voteMsg as any).react === 'function') {
-		await (voteMsg as any).react('👍');
+	if (voteMsg) {
+		// Link before seeding the reaction so vote syncing works even if react fails.
 		linkVoteMessage(voteMsg.id, issue.number);
+		await (voteMsg as any).react?.('👍')?.catch?.((err: unknown) => console.warn('vote seed react failed:', err));
 	}
-	await upsertDiscordVoteComment(issue.number, 0);
+	await upsertDiscordVoteComment(issue.number, 0).catch((err: unknown) => console.warn('vote comment init failed:', err));
 
-	if (thread && (thread as any).isTextBased?.()) {
-		const notice = auto
+	await sendThreadNotice(
+		thread,
+		auto
 			? `⏱️ Draft timed out — filed idea **#${issue.number}** with the info we had. ${issue.html_url}`
-			: `✅ Created idea **#${issue.number}** - ${issue.title}`;
-		await (thread as any).send(notice);
-	}
+			: `✅ Created idea **#${issue.number}** - ${issue.title}`
+	);
 	return issue;
 }
 
 // File a bug issue from a pending draft + thread notice.
 async function postBugFromPending(pending: any, auto: boolean) {
-	const body = (pending.body as string) + (auto ? unansweredAppendix(pending) : '');
-	const issue = (pending._postedIssue as any) || await createBugIssue({ title: pending.title, body });
-	pending._postedIssue = issue;
-
-	const threadId = pending.threadId || pending.sourceChannelId;
-	const thread = threadId ? await client.channels.fetch(threadId as string).catch(() => null) : null;
-	if (thread && (thread as any).isTextBased?.()) {
-		const notice = auto
+	const issue = await fileIssueOnce(pending, auto, createBugIssue);
+	const thread = await resolveDraftThread(pending);
+	await sendThreadNotice(
+		thread,
+		auto
 			? `⏱️ Draft timed out — filed bug **#${issue.number}** with the info we had. ${issue.html_url}`
-			: `✅ Bug report posted to GitHub as issue **#${issue.number}**`;
-		await (thread as any).send(notice);
-	}
+			: `✅ Bug report posted to GitHub as issue **#${issue.number}**`
+	);
 	return issue;
 }
 

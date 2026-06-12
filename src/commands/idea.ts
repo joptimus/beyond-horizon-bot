@@ -57,7 +57,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   const codeContext = await findCodePointers(rawText, "idea");
 
   // First pass enrichment
-  const enriched = await enrichIdea(rawText, submitterTag, undefined, undefined, codeContext);
+  const enriched = await enrichIdea(rawText, submitterTag, { codeContext });
 
   // Create (or fail gracefully) a thread in the current channel
   const ch = interaction.channel;
@@ -106,12 +106,12 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       authorId: interaction.user.id,
       rawText,
       title: `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`,
-      body: toIssueBody(enriched, submitterTag, interaction.user.id, rawText, undefined, codeContext),
+      body: toIssueBody(enriched, submitterTag, interaction.user.id, rawText, { codeContext }),
       createdAt: Date.now(),
       openQuestions: enriched.openQuestions.slice(0, 5),
       phase: "awaiting_answers",
+      codeContext,
       ...( { enriched } as any ),
-      ...( { codeContext } as any ),
       ...( { sourceMessageId: promptMsg.id, sourceChannelId: thread.id, threadId: thread.id } as any ),
         ...( { parentChannelId: interaction.channelId } as any ),
     });
@@ -130,11 +130,11 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     authorId: interaction.user.id,
     rawText,
     title: `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`,
-    body: toIssueBody(enriched, submitterTag, interaction.user.id, rawText, undefined, codeContext),
+    body: toIssueBody(enriched, submitterTag, interaction.user.id, rawText, { codeContext }),
     createdAt: Date.now(),
     phase: "awaiting_approval",
+    codeContext,
     ...( { enriched } as any ),
-    ...( { codeContext } as any ),
     ...( { sourceChannelId: thread.id, threadId: thread.id } as any ),
       ...( { parentChannelId: interaction.channelId } as any ),
   });

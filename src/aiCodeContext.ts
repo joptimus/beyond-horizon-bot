@@ -7,10 +7,24 @@
 import OpenAI from "openai";
 import type { CodeContext } from "./codeContextTypes.js";
 import { getOpenAiTools, callTool, isRepowiseEnabled, type OpenAiToolDef } from "./repowiseMcp.js";
+import { getOpenAiClient, OPENAI_MODEL, stripFences } from "./aiShared.js";
 
-const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
 const MAX_TOOL_CALLS = 5;
 const TIME_BUDGET_MS = 15_000;
+const PER_CALL_TIMEOUT_MS = 10_000;
+
+// The time budget is only checked between loop iterations and cannot interrupt
+// an in-flight await, so every network call is individually raced against a
+// timeout (the underlying request keeps running, but the submission moves on).
+function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const t = setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    p.then(
+      (v) => { clearTimeout(t); resolve(v); },
+      (e) => { clearTimeout(t); reject(e); }
+    );
+  });
+}
 
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
 
@@ -23,16 +37,11 @@ export type FindDeps = {
   enabled: boolean;
 };
 
-let defaultClient: OpenAI | null = null;
-function getDefaultClient(): OpenAI {
-  if (!defaultClient) defaultClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
-  return defaultClient;
-}
 function getDefaultDeps(): FindDeps {
   return {
     getTools: getOpenAiTools,
     callTool,
-    createCompletion: (params) => getDefaultClient().chat.completions.create(params) as any,
+    createCompletion: (params) => getOpenAiClient().chat.completions.create(params) as any,
     now: () => Date.now(),
     enabled: isRepowiseEnabled(),
   };
@@ -55,7 +64,7 @@ Rules: at most 6 pointers; omit "symbol" if not applicable; if you found nothing
 `;
 
 function parseFinal(content: string): CodeContext | null {
-  const cleaned = content.replace(/```(?:json)?\s*|```/gi, "").trim();
+  const cleaned = stripFences(content);
   try {
     const obj = JSON.parse(cleaned);
     if (!obj || !Array.isArray(obj.whereToStart)) return null;
@@ -101,14 +110,18 @@ export async function findCodePointers(
       const outOfCalls = toolCalls >= MAX_TOOL_CALLS;
       forceFinal = forceFinal || outOfTime || outOfCalls;
 
-      const res = await deps.createCompletion({
-        model: MODEL,
-        temperature: 0.1,
-        messages,
-        // Withholding tools forces the model to answer with prose/JSON.
-        tools: forceFinal ? undefined : tools,
-        tool_choice: forceFinal ? undefined : "auto",
-      });
+      const res = await withTimeout(
+        deps.createCompletion({
+          model: OPENAI_MODEL,
+          temperature: 0.1,
+          messages,
+          // Withholding tools forces the model to answer with prose/JSON.
+          tools: forceFinal ? undefined : tools,
+          tool_choice: forceFinal ? undefined : "auto",
+        }),
+        PER_CALL_TIMEOUT_MS,
+        "completion"
+      );
 
       const msg = res.choices[0]?.message;
       if (!msg) return null;
@@ -120,11 +133,17 @@ export async function findCodePointers(
           let toolText = "";
           if (toolCalls >= MAX_TOOL_CALLS) {
             toolText = "(tool call skipped: search budget reached)";
+          } else if (deps.now() - start > TIME_BUDGET_MS) {
+            toolText = "(tool call skipped: time budget reached)";
           } else {
             toolCalls++;
             try {
               const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
-              toolText = await deps.callTool(call.function.name, args);
+              toolText = await withTimeout(
+                deps.callTool(call.function.name, args),
+                PER_CALL_TIMEOUT_MS,
+                `tool ${call.function.name}`
+              );
             } catch (err) {
               toolText = `tool error: ${(err as Error).message}`;
             }
@@ -138,10 +157,17 @@ export async function findCodePointers(
       const parsed = parseFinal(msg.content || "");
       if (parsed) return parsed;
 
+      // Out of budget: don't spend another round trip nudging for valid JSON.
+      if (deps.now() - start > TIME_BUDGET_MS) return null;
+
       // One retry: nudge for valid JSON, force final.
       messages.push(msg as ChatMessage);
       messages.push({ role: "user", content: "Your previous reply was not valid JSON. Reply with ONLY the JSON object described, nothing else." });
-      const retry = await deps.createCompletion({ model: MODEL, temperature: 0, messages });
+      const retry = await withTimeout(
+        deps.createCompletion({ model: OPENAI_MODEL, temperature: 0, messages }),
+        PER_CALL_TIMEOUT_MS,
+        "completion (json retry)"
+      );
       return parseFinal(retry.choices[0]?.message?.content || "");
     }
   } catch (err) {

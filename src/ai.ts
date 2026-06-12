@@ -2,13 +2,7 @@
 import OpenAI from "openai";
 import type { CodeContext } from "./codeContextTypes.js";
 import { renderWhereToStart } from "./codeContextTypes.js";
-
-// ---- Env & client ----
-const API_KEY = process.env.OPENAI_API_KEY;
-if (!API_KEY) throw new Error("Missing OPENAI_API_KEY in .env");
-
-const client = new OpenAI({ apiKey: API_KEY });
-const MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+import { getOpenAiClient, OPENAI_MODEL, stripFences, codeContextBlock } from "./aiShared.js";
 
 // Convenience type that always matches the SDK
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionCreateParams["messages"][number];
@@ -57,11 +51,6 @@ Question quality rules:
   function names, or jargon).
 - Cap at 2-3 questions; ask none if the report + code context suffice.
 `;
-
-function codeContextBlock(codeContext?: { whereToStart: unknown[]; suspectedCause?: string | null; affectedSystems: string[]; confidence: string } | null): string {
-  if (!codeContext || !codeContext.whereToStart?.length) return "";
-  return `\n<codeContext>\n${JSON.stringify(codeContext, null, 2)}\n</codeContext>\nUse this to avoid asking what the code already reveals.\n`;
-}
 
 // ---- Prompt builders ----
 function firstPassPrompt(raw: string, author: string, codeCtxBlock: string) {
@@ -133,10 +122,6 @@ export type Enriched = {
 };
 
 // ---- Helpers ----
-function stripFences(s: string) {
-  // Remove ```json ... ``` or ``` ... ```
-  return s.replace(/```(?:json)?\s*|```/gi, "").trim();
-}
 function toArray(x: unknown): string[] {
   return Array.isArray(x) ? x.filter(Boolean).map(String) : [];
 }
@@ -194,8 +179,8 @@ function scrubScopeList(list?: unknown[], kind: "client" | "server" | "database"
 }
 
 async function callOnce(messages: ChatMessage[]) {
-  const res = await client.chat.completions.create({
-    model: MODEL,
+  const res = await getOpenAiClient().chat.completions.create({
+    model: OPENAI_MODEL,
     temperature: 0.2,
     // Some SDK versions don't expose response_format in types; cast to any to use JSON mode.
     response_format: { type: "json_object" } as any,
@@ -205,13 +190,18 @@ async function callOnce(messages: ChatMessage[]) {
 }
 
 // ---- Main API ----
+export type EnrichIdeaOpts = {
+  answersText?: string;
+  previous?: Enriched;
+  codeContext?: CodeContext | null;
+};
+
 export async function enrichIdea(
   rawText: string,
   author: string,
-  answersText?: string,
-  previous?: Enriched,
-  codeContext?: CodeContext | null
+  opts: EnrichIdeaOpts = {}
 ): Promise<Enriched> {
+  const { answersText, previous, codeContext } = opts;
   const previousJSON = previous ? JSON.stringify(previous, null, 2) : "{}";
   const codeCtxBlock = codeContextBlock(codeContext);
   const userPrompt = answersText
@@ -246,14 +236,19 @@ function linesOrNone(arr?: string[]) {
   return Array.isArray(arr) && arr.length ? arr.map((x) => `- ${x}`).join("\n") : "- (none)";
 }
 
+export type IssueBodyOpts = {
+  qa?: string;
+  codeContext?: CodeContext | null;
+};
+
 export function toIssueBody(
   e: Enriched,
   userTag: string,
   userId: string,
   raw: string,
-  qa?: string,
-  codeContext?: CodeContext | null
+  opts: IssueBodyOpts = {}
 ) {
+  const { qa, codeContext } = opts;
   const scope = [
     `**Client (Unity)**\n${linesOrNone(e.scope?.client)}`,
     `\n**Server (Node)**\n${linesOrNone(e.scope?.server)}`,
