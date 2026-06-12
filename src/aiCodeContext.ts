@@ -114,13 +114,17 @@ export async function findCodePointers(
       if (!forceFinal && calls.length) {
         messages.push(msg as ChatMessage);
         for (const call of calls) {
-          toolCalls++;
           let toolText = "";
-          try {
-            const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
-            toolText = await deps.callTool(call.function.name, args);
-          } catch (err) {
-            toolText = `tool error: ${(err as Error).message}`;
+          if (toolCalls >= MAX_TOOL_CALLS) {
+            toolText = "(tool call skipped: search budget reached)";
+          } else {
+            toolCalls++;
+            try {
+              const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
+              toolText = await deps.callTool(call.function.name, args);
+            } catch (err) {
+              toolText = `tool error: ${(err as Error).message}`;
+            }
           }
           messages.push({ role: "tool", tool_call_id: call.id, content: toolText || "(no result)" });
         }
