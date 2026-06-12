@@ -35,7 +35,9 @@ import * as InviteSlash from './commands/invite.js';
 // ---- AI & pending store for Q→A→Approval flow ----
 import { enrichIdea, toIssueBody } from './ai.js';
 import { enrichBug, toBugIssueBody } from './aiBug.js';
-import { getPending, putPending, delPending } from './pending.js';
+import { getPending, putPending, delPending, setOnExpire, type PendingIdea } from './pending.js';
+import { findCodePointers } from './aiCodeContext.js';
+import type { CodeContext } from './codeContextTypes.js';
 import { getIssueFromVoteMessage, linkVoteMessage } from './votes.js';
 // ---- GitHub helpers (issue + vote sync) ----
 import { createIdeaIssue, createBugIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas, extractSummaryFromIssueBody, fetchIssue } from './github.js';
@@ -115,6 +117,14 @@ function buildVerifyButton(): ActionRowBuilder<ButtonBuilder> {
 client.once(Events.ClientReady, (c) => {
 	console.log(`🤖 Logged in as ${c.user.tag}`);
 	startApi(client);
+	setOnExpire(async (draft: PendingIdea) => {
+		// Auto-file drafts that reached a usable state. Both phases qualify per spec.
+		if (draft.type === 'bug') {
+			await postBugFromPending(draft, true);
+		} else {
+			await postIdeaFromPending(draft, true);
+		}
+	});
 });
 
 // Create a public thread off the invoking message (prefix flow)
@@ -182,7 +192,8 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
 			const submitterTag = `${message.author.username}#${message.author.discriminator}`;
 			// 1) First pass enrichment
-			const enriched = await enrichIdea(rawText, submitterTag);
+			const codeContext = await findCodePointers(rawText, 'idea');
+			const enriched = await enrichIdea(rawText, submitterTag, undefined, undefined, codeContext);
 			const id = crypto.randomUUID();
 
 			// 2) If questions exist → ask to Answer or Skip (inside a thread)
@@ -219,7 +230,8 @@ client.on(Events.MessageCreate, async (message: Message) => {
 					authorId: message.author.id,
 					rawText,
 					title: `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`,
-					body: toIssueBody(enriched, submitterTag, message.author.id, rawText),
+					body: toIssueBody(enriched, submitterTag, message.author.id, rawText, undefined, codeContext),
+					codeContext,
 					createdAt: Date.now(),
 					openQuestions: enriched.openQuestions.slice(0, 5),
 					phase: 'awaiting_answers',
@@ -239,7 +251,8 @@ client.on(Events.MessageCreate, async (message: Message) => {
 				authorId: message.author.id,
 				rawText,
 				title: `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`,
-				body: toIssueBody(enriched, submitterTag, message.author.id, rawText),
+				body: toIssueBody(enriched, submitterTag, message.author.id, rawText, undefined, codeContext),
+				codeContext,
 				createdAt: Date.now(),
 				phase: 'awaiting_approval',
 				...({ enriched } as any),
@@ -273,7 +286,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
 			// 🔹 Post approval card in the thread
 			await thread.send({
-				content: 'Here’s the AI-enriched draft. Approve to post.',
+				content: "Here's the AI-enriched draft. Approve to post.",
 				embeds: [previewEmbed],
 				components: [previewRow],
 			});
@@ -327,7 +340,8 @@ client.on(Events.MessageCreate, async (message: Message) => {
 			if (!rawText) return message.reply('❗ Usage: `!bug <description>`');
 
 			const submitterTag = message.author.tag;
-			const enriched = await enrichBug(rawText, submitterTag);
+			const codeContext = await findCodePointers(rawText, 'bug');
+			const enriched = await enrichBug(rawText, submitterTag, undefined, undefined, codeContext);
 			const id = crypto.randomUUID();
 
 			// Create thread for bug report
@@ -370,7 +384,8 @@ client.on(Events.MessageCreate, async (message: Message) => {
 					authorId: message.author.id,
 					rawText,
 					title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-					body: toBugIssueBody(enriched, submitterTag),
+					body: toBugIssueBody(enriched, submitterTag, rawText, undefined, codeContext),
+					codeContext,
 					createdAt: Date.now(),
 					openQuestions: enriched.openQuestions.slice(0, 3),
 					phase: 'awaiting_answers',
@@ -388,7 +403,8 @@ client.on(Events.MessageCreate, async (message: Message) => {
 				authorId: message.author.id,
 				rawText,
 				title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-				body: toBugIssueBody(enriched, submitterTag),
+				body: toBugIssueBody(enriched, submitterTag, rawText, undefined, codeContext),
+				codeContext,
 				createdAt: Date.now(),
 				phase: 'awaiting_approval',
 				...({ enriched } as any),
@@ -491,77 +507,22 @@ client.on(Events.InteractionCreate, async (i) => {
 			return i.update({ content: 'Review the draft below.', embeds: [embed], components: [row] });
 		}
 
-		// Approve → Create issue + post voting message
-		// Approve → Create issue + post vote in parent channel; post confirmation in thread
 		if (action === 'approve') {
-			await clearOldPromptComponents(pending);
-			await i.update({ content: 'Posting your idea…', components: [], embeds: [] });
+				await clearOldPromptComponents(pending);
+				await i.update({ content: 'Posting your idea...', components: [], embeds: [] });
 
-			const issue = await createIdeaIssue({ title: (pending as any).title, body: (pending as any).body });
+				const issue = await postIdeaFromPending(pending, false);
 
-			// Build the summary like !explain does
-			const summary = extractSummaryFromIssueBody(issue.body || '');
-			const desc = summary
-				? `**Summary**\n${summary}\n\nReact with 👍 to vote.`
-				: `**Summary**\n_(no summary found in issue body)_\n\nReact with 👍 to vote.`;
-
-			// Resolve thread + parent
-			const threadId = (pending as any).threadId || (pending as any).sourceChannelId;
-			const thread = threadId ? await client.channels.fetch(threadId as string) : null;
-
-			// Try to get parent channel id
-			let parentChannel: any = null;
-			try {
-				if (thread && (thread as any).isThread?.()) {
-					const parentId = (thread as any).parentId;
-					if (parentId) parentChannel = await client.channels.fetch(parentId);
-				}
-				// fallback if we stored it when creating the thread
-				if (!parentChannel && (pending as any).parentChannelId) {
-					parentChannel = await client.channels.fetch((pending as any).parentChannelId as string);
-				}
-			} catch {}
-
-			// 1) Post VOTE message in the PARENT CHANNEL (not in the thread)
-			let voteMsg: Message | null = null;
-
-			const voteEmbed = new EmbedBuilder()
-				.setTitle(`Idea #${issue.number}: ${issue.title}`)
-				.setURL(issue.html_url) // clickable -> GitHub issue
-				.setDescription(desc) // uses the Summary like !explain
-				.setColor(0x00ae86); // same color you use elsewhere
-
-			if (parentChannel && (parentChannel as any).isTextBased?.()) {
-				voteMsg = await(parentChannel as any).send({ embeds: [voteEmbed] });
-			} else {
-				// Last-resort fallback
-				voteMsg = await i.followUp({ embeds: [voteEmbed], fetchReply: true } as any);
+				delPending(id);
+				return i.followUp({ content: `Done. Idea #${issue.number} posted.`, ephemeral: true });
 			}
 
-			if (voteMsg && typeof (voteMsg as any).react === 'function') {
-				await(voteMsg as any).react('👍');
-				linkVoteMessage(voteMsg.id, issue.number);
+			// Cancel
+			if (action === 'cancel') {
+				await clearOldPromptComponents(pending);
+				delPending(id);
+				return i.update({ content: 'Draft **canceled**.', components: [], embeds: [] });
 			}
-
-			await upsertDiscordVoteComment(issue.number, 0);
-
-			// 2) Post CREATED notice INSIDE the THREAD
-			if (thread && (thread as any).isTextBased?.()) {
-				await(thread as any).send(`✅ Created idea **#${issue.number}** - ${issue.title}`);
-			}
-
-			delPending(id);
-
-			// Optional: small confirmation to the approver (won’t spam channels)
-			return i.followUp({ content: `Done. Idea #${issue.number} posted.`, ephemeral: true });
-		}
-
-		// Cancel
-		if (action === 'cancel') {
-			await clearOldPromptComponents(pending);
-			delPending(id);
-			return i.update({ content: 'Draft **canceled**.', components: [], embeds: [] });
-		}
 		} // end if (ns === 'idea')
 
 		// ----- BUG BUTTONS -----
@@ -617,18 +578,9 @@ client.on(Events.InteractionCreate, async (i) => {
 				await clearOldPromptComponents(pending);
 				await i.update({ content: 'Posting your bug report…', components: [], embeds: [] });
 
-				const issue = await createBugIssue({ title: (pending as any).title, body: (pending as any).body });
-
-				// Post confirmation in thread
-				const threadId = (pending as any).threadId || (pending as any).sourceChannelId;
-				const thread = threadId ? await client.channels.fetch(threadId as string) : null;
-
-				if (thread && (thread as any).isTextBased?.()) {
-					await (thread as any).send(`✅ Bug report posted to GitHub as issue **#${issue.number}**`);
-				}
+				const issue = await postBugFromPending(pending, false);
 
 				delPending(id);
-
 				return i.followUp({ content: `Done. Bug #${issue.number} posted.`, ephemeral: true });
 			}
 
@@ -702,10 +654,11 @@ client.on(Events.InteractionCreate, async (i) => {
 			// Re-enrich with answers → pass previous JSON for refinement
 			const submitterTag = i.user.tag;
 			const previous = (pending as any).enriched || undefined;
-			const enriched2 = await enrichIdea((pending as any).rawText, submitterTag, answersText, previous);
+			const codeContext = ((pending as any).codeContext as CodeContext | null) || null;
+			const enriched2 = await enrichIdea((pending as any).rawText, submitterTag, answersText, previous, codeContext);
 
 			const finalTitle = `[IDEA] ${(enriched2.title || (pending as any).rawText).slice(0, 80)}`;
-			const finalBody = toIssueBody(enriched2, submitterTag, i.user.id, (pending as any).rawText, answersText);
+			const finalBody = toIssueBody(enriched2, submitterTag, i.user.id, (pending as any).rawText, answersText, codeContext);
 
 			(pending as any).title = finalTitle;
 			(pending as any).body = finalBody;
@@ -782,10 +735,11 @@ client.on(Events.InteractionCreate, async (i) => {
 			// Re-enrich with answers
 			const submitterTag = i.user.tag;
 			const previous = (pending as any).enriched || undefined;
-			const enriched2 = await enrichBug((pending as any).rawText, submitterTag, answersText, previous);
+			const codeContext = ((pending as any).codeContext as CodeContext | null) || null;
+			const enriched2 = await enrichBug((pending as any).rawText, submitterTag, answersText, previous, codeContext);
 
 			const finalTitle = `[BUG] ${(enriched2.title || (pending as any).rawText).slice(0, 80)}`;
-			const finalBody = toBugIssueBody(enriched2, submitterTag);
+			const finalBody = toBugIssueBody(enriched2, submitterTag, (pending as any).rawText, answersText, codeContext);
 
 			(pending as any).title = finalTitle;
 			(pending as any).body = finalBody;
@@ -950,6 +904,83 @@ async function clearOldPromptComponents(pending: any) {
 		console.warn('clearOldPromptComponents failed:', err);
 	}
 }
+// Build an “Open Questions (unanswered)” appendix from a draft still carrying questions.
+function unansweredAppendix(pending: any): string {
+	const qs: string[] = (pending?.openQuestions as string[]) || [];
+	// If the draft was answered, answersText exists and we skip the appendix.
+	if (pending?.answersText || !qs.length) return '';
+	const lines = qs.map((q) => `- ${q}`).join('\n');
+	return `\n\n## Open Questions (unanswered)\n${lines}`;
+}
+
+// File an idea issue from a pending draft. Posts the vote embed + reaction sync,
+// and a thread notice. `auto` toggles wording for the TTL-expiry path.
+async function postIdeaFromPending(pending: any, auto: boolean) {
+	const body = (pending.body as string) + (auto ? unansweredAppendix(pending) : '');
+	const issue = await createIdeaIssue({ title: pending.title, body });
+
+	const summary = extractSummaryFromIssueBody(issue.body || '');
+	const desc = summary
+		? `**Summary**\n${summary}\n\nReact with 👍 to vote.`
+		: `**Summary**\n_(no summary found in issue body)_\n\nReact with 👍 to vote.`;
+
+	const threadId = pending.threadId || pending.sourceChannelId;
+	const thread = threadId ? await client.channels.fetch(threadId as string).catch(() => null) : null;
+
+	let parentChannel: any = null;
+	try {
+		if (thread && (thread as any).isThread?.()) {
+			const parentId = (thread as any).parentId;
+			if (parentId) parentChannel = await client.channels.fetch(parentId);
+		}
+		if (!parentChannel && pending.parentChannelId) {
+			parentChannel = await client.channels.fetch(pending.parentChannelId as string);
+		}
+	} catch {}
+
+	const voteEmbed = new EmbedBuilder()
+		.setTitle(`Idea #${issue.number}: ${issue.title}`)
+		.setURL(issue.html_url)
+		.setDescription(desc)
+		.setColor(0x00ae86);
+
+	let voteMsg: Message | null = null;
+	if (parentChannel && (parentChannel as any).isTextBased?.()) {
+		voteMsg = await (parentChannel as any).send({ embeds: [voteEmbed] });
+	} else if (thread && (thread as any).isTextBased?.()) {
+		voteMsg = await (thread as any).send({ embeds: [voteEmbed] });
+	}
+	if (voteMsg && typeof (voteMsg as any).react === 'function') {
+		await (voteMsg as any).react('👍');
+		linkVoteMessage(voteMsg.id, issue.number);
+	}
+	await upsertDiscordVoteComment(issue.number, 0);
+
+	if (thread && (thread as any).isTextBased?.()) {
+		const notice = auto
+			? `⏱️ Draft timed out — filed idea **#${issue.number}** with the info we had. ${issue.html_url}`
+			: `✅ Created idea **#${issue.number}** - ${issue.title}`;
+		await (thread as any).send(notice);
+	}
+	return issue;
+}
+
+// File a bug issue from a pending draft + thread notice.
+async function postBugFromPending(pending: any, auto: boolean) {
+	const body = (pending.body as string) + (auto ? unansweredAppendix(pending) : '');
+	const issue = await createBugIssue({ title: pending.title, body });
+
+	const threadId = pending.threadId || pending.sourceChannelId;
+	const thread = threadId ? await client.channels.fetch(threadId as string).catch(() => null) : null;
+	if (thread && (thread as any).isTextBased?.()) {
+		const notice = auto
+			? `⏱️ Draft timed out — filed bug **#${issue.number}** with the info we had. ${issue.html_url}`
+			: `✅ Bug report posted to GitHub as issue **#${issue.number}**`;
+		await (thread as any).send(notice);
+	}
+	return issue;
+}
+
 // =========================================
 // Reaction sync: keep GitHub “Discord votes: N” updated
 // =========================================
