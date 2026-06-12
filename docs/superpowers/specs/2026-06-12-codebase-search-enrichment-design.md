@@ -25,7 +25,7 @@ GitHub issue: concrete repo/file/symbol pointers with a one-line reason each.
 | When it runs | **At approval click**, just before issue creation | Only approved ideas pay the cost; operates on final post-Q&A content; submission latency unchanged |
 | Output location | **GitHub issue body only** | Devs see it where they work; Discord embeds stay clean, no code structure leaked to players |
 | Scope | **Both ideas and bugs** | Same service powers both enrichment paths |
-| Bot hosting | **Migrate from Railway to the user's Windows Docker server** | Bot reaches repowise over the private Docker network; nothing exposed to the internet |
+| Bot hosting | **Stay on Railway** | repowise's MCP endpoint is already exposed via Cloudflare Tunnel + Cloudflare Access (`https://repowise-mcp.thunderducky.com`); the bot authenticates with its own CF Access service token, so no migration is needed |
 
 ## Architecture
 
@@ -47,11 +47,14 @@ createIdeaIssue() / createBugIssue()   (unchanged)
 
 MCP client wrapper around repowise's MCP server.
 
-- Env: `REPOWISE_MCP_URL` (e.g. `http://repowise:7338/mcp`), `REPOWISE_API_KEY`
-  (sent as `Authorization: Bearer` header if set). **If `REPOWISE_MCP_URL` is unset,
-  the feature is disabled and the bot behaves exactly as today.**
-- Connects lazily (first use) with `StreamableHTTPClientTransport`; reconnects on
-  dropped sessions.
+- Env: `REPOWISE_MCP_URL` (e.g. `https://repowise-mcp.thunderducky.com/sse`),
+  `CF_ACCESS_CLIENT_ID` + `CF_ACCESS_CLIENT_SECRET` (Cloudflare Access service-token
+  headers, sent on every request), optional `REPOWISE_API_KEY` (`Authorization:
+  Bearer` header if repowise itself also requires auth). **If `REPOWISE_MCP_URL` is
+  unset, the feature is disabled and the bot behaves exactly as today.**
+- Transport chosen by URL path: `/sse` → `SSEClientTransport`, otherwise
+  `StreamableHTTPClientTransport` (both from `@modelcontextprotocol/sdk`; both accept
+  custom headers). Connects lazily (first use); reconnects on dropped sessions.
 - On connect, calls `tools/list` and filters to an allowlist:
   `search_codebase`, `get_symbol`, `get_context`, `list_repos`
   (not all 17 repowise tools — keeps the model focused).
@@ -100,21 +103,19 @@ MCP client wrapper around repowise's MCP server.
   search input is built from those (no schema change needed; `body` carries the full
   enriched content).
 
-## Docker Deployment (migration off Railway)
+## Deployment (bot stays on Railway)
 
-- **`Dockerfile`** — multi-stage: `node:22-alpine`; build stage runs `npm ci` +
-  `npm run build`; runtime stage copies `dist/` + production `node_modules`, runs
-  `node dist/bot.js`.
-- **`docker-compose.yml`** — single `bot` service, `env_file: .env`,
-  `restart: unless-stopped`, joined to the repowise compose network declared as an
-  **external network** so the bot reaches `http://repowise:7338`. If the network name
-  differs on the server, it is a one-line change; `host.docker.internal` is the
-  fallback if repowise's MCP port is published on the host instead.
-- **`.env.example`** — add `REPOWISE_MCP_URL`, `REPOWISE_API_KEY`.
-- Migration steps: copy Railway env vars into the server's `.env`, add the repowise
-  vars, `docker compose up -d`, verify, then shut down the Railway deployment.
-  (Pending drafts are in-memory with a 10-min TTL, so a quiet-moment cutover loses
-  nothing.)
+- No Dockerfile or migration. The bot keeps running on Railway and reaches repowise
+  over the internet through Cloudflare Tunnel + Cloudflare Access.
+- New Railway env vars: `REPOWISE_MCP_URL`, `CF_ACCESS_CLIENT_ID`,
+  `CF_ACCESS_CLIENT_SECRET` (and `REPOWISE_API_KEY` if used).
+- **`.env.example`** — add the same vars for local dev.
+- Security: create a **dedicated CF Access service token for the bot** (separate from
+  the personal one used by Claude Code) so it can be revoked independently.
+- Prerequisite (server-side, user-owned): the tunnel ingress route for
+  `repowise-mcp.thunderducky.com` must point at the running `repowise mcp` process —
+  as of 2026-06-12 the hostname returns 421 (missing ingress rule), which must be
+  fixed before the feature can work end-to-end.
 
 ## Error Handling Summary
 
@@ -141,7 +142,7 @@ tune the system prompt and tool subset before wiring into Discord.
 
 ## Out of Scope
 
-- Exposing repowise/MCP to the internet (the user's hosted-MCP goal) — later project.
+- Fixing the Cloudflare Tunnel ingress for `repowise-mcp.thunderducky.com` — server-side prerequisite owned by the user, not part of this codebase.
 - OpenAI Responses API native MCP integration — possible later upgrade once the MCP
   endpoint is public.
 - Showing pointers in Discord, re-running search after issue creation, index
