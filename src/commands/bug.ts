@@ -104,7 +104,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
       openQuestions: enriched.openQuestions.slice(0, 3),
       phase: "awaiting_answers",
       codeContext,
-      ...({ enriched } as any),
+      ...({ enriched, relatedIssues: dupes } as any),
       ...({ sourceMessageId: promptMsg.id, sourceChannelId: thread.id, threadId: thread.id, parentChannelId: interaction.channelId } as any),
     });
 
@@ -122,7 +122,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     createdAt: Date.now(),
     phase: "awaiting_approval",
     codeContext,
-    ...({ enriched } as any),
+    ...({ enriched, relatedIssues: dupes } as any),
     ...({ sourceChannelId: thread.id, threadId: thread.id, parentChannelId: interaction.channelId } as any),
   });
 

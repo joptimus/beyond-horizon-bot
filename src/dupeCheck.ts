@@ -66,5 +66,16 @@ export function renderDuplicatesBlock(dupes: DuplicateCandidate[]): string {
     .slice(0, 5)
     .map((d) => `• [#${d.number}](${d.html_url}) ${d.title}`)
     .join("\n");
-  return `\n\n⚠️ **Possibly already reported:**\n${lines}\nIf one of these is your issue, please Cancel and add a 👍 / comment there instead.`;
+  return `\n\n🔗 **Related issues found** — the GitHub issue will reference them:\n${lines}`;
+}
+
+/**
+ * GitHub-markdown section appended to the new issue body. The bare `#N`
+ * mentions make GitHub show a cross-reference on each related issue, so the
+ * link is visible from both sides.
+ */
+export function renderRelatedIssuesSection(related?: DuplicateCandidate[] | null): string {
+  if (!Array.isArray(related) || !related.length) return "";
+  const lines = related.slice(0, 5).map((d) => `- #${d.number} ${d.title}`).join("\n");
+  return `\n\n## Related Issues\n${lines}`;
 }

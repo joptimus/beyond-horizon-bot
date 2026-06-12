@@ -39,7 +39,7 @@ import { enrichIdea, toIssueBody } from './ai.js';
 import { enrichBug, toBugIssueBody } from './aiBug.js';
 import { getPending, putPending, delPending, setOnExpire, type PendingIdea } from './pending.js';
 import { findCodePointers } from './aiCodeContext.js';
-import { findPossibleDuplicates, renderDuplicatesBlock } from './dupeCheck.js';
+import { findPossibleDuplicates, renderDuplicatesBlock, renderRelatedIssuesSection } from './dupeCheck.js';
 import { testConnectionOnStartup } from './repowiseMcp.js';
 import type { CodeContext } from './codeContextTypes.js';
 import { getIssueFromVoteMessage, linkVoteMessage } from './votes.js';
@@ -417,7 +417,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 					createdAt: Date.now(),
 					openQuestions: enriched.openQuestions.slice(0, 3),
 					phase: 'awaiting_answers',
-					...({ enriched } as any),
+					...({ enriched, relatedIssues: dupes } as any),
 					...({ sourceMessageId: promptMsg.id, sourceChannelId: thread.id, threadId: thread.id, parentChannelId: message.channelId } as any),
 				});
 
@@ -435,7 +435,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 				codeContext,
 				createdAt: Date.now(),
 				phase: 'awaiting_approval',
-				...({ enriched } as any),
+				...({ enriched, relatedIssues: dupes } as any),
 				...({ sourceChannelId: thread.id, threadId: thread.id, parentChannelId: message.channelId } as any),
 			});
 
@@ -1015,7 +1015,7 @@ function unansweredAppendix(pending: any): string {
 // issue is reused instead of duplicated.
 async function fileIssueOnce(pending: any, auto: boolean, create: (p: { title: string; body: string }) => Promise<any>) {
 	if (pending._postedIssue) return pending._postedIssue;
-	const body = (pending.body as string) + (auto ? unansweredAppendix(pending) : '');
+	const body = (pending.body as string) + renderRelatedIssuesSection(pending.relatedIssues) + (auto ? unansweredAppendix(pending) : '');
 	const issue = await create({ title: pending.title, body });
 	pending._postedIssue = issue;
 	return issue;
