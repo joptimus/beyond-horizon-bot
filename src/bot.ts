@@ -1162,6 +1162,45 @@ client.on(Events.MessageReactionRemove, async (reaction, user) => {
 // ======================
 // Member Join Flow (Welcome DM + Verify Channel Post)
 // ======================
+
+// Voran-themed welcome messages. One is picked at random per join so the
+// welcome channel doesn't feel repetitive. `{member}` is replaced with the
+// new member's mention.
+const WELCOME_MESSAGES: ReadonlyArray<{ title: string; body: string }> = [
+	{
+		title: 'A New Commander Arrives',
+		body: 'Welcome aboard, {member}. The stars beyond the horizon are uncharted — and you\'re now part of the fleet that will claim them. Link your callsign to take your place among the commanders.',
+	},
+	{
+		title: 'The Frontier Welcomes You',
+		body: '{member} has crossed into the sector. Out here, every commander earns their legend — and yours starts now. Link your enlistment designation to unlock full access.',
+	},
+	{
+		title: 'Signal Received',
+		body: 'A new transponder lights up the grid — welcome, {member}. The Voran fleet grows stronger with every commander who answers the call. Link your callsign to join the ranks.',
+	},
+	{
+		title: 'Another Star Claimed',
+		body: '{member} drops out of warp into friendly space. The horizon is vast, but you won\'t chart it alone. Verify your enlistment and take your place among the fleet.',
+	},
+	{
+		title: 'Welcome to the Sector',
+		body: 'The fleet logs a new arrival: {member}. Beyond the known systems, fortunes are won and empires are built. Link your callsign and begin your campaign.',
+	},
+	{
+		title: 'New Arrival Confirmed',
+		body: 'Greetings, {member}. You\'ve reached the staging grounds of the Voran fleet, where commanders gather before the next push into the dark. Verify your enlistment to gain full access.',
+	},
+	{
+		title: 'Your Journey Begins',
+		body: 'Welcome, {member}. Every great commander started with a single jump — and this is yours. Link your designation and claim your place beyond the horizon.',
+	},
+	{
+		title: 'The Fleet Grows',
+		body: '{member} joins the ranks. The frontier rewards the bold, and there\'s a place for you among the stars. Link your callsign to step into the fold.',
+	},
+];
+
 client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
 	log.info(`[MEMBER JOIN] ${member.user.tag} (${member.user.id}) joined guild ${member.guild.id}`);
 	try {
@@ -1230,6 +1269,42 @@ client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
 			}
 		} else {
 			log.warn(`[MEMBER JOIN] ⚠️ VERIFY_CHANNEL_ID not set in environment`);
+		}
+
+		// 6. Post welcome embed in welcome channel
+		const welcomeChannelId = process.env.WELCOME_CHANNEL_ID;
+		log.debug(`[MEMBER JOIN] WELCOME_CHANNEL_ID from env: ${welcomeChannelId}`);
+
+		if (welcomeChannelId) {
+			try {
+				log.debug(`[MEMBER JOIN] Fetching welcome channel: ${welcomeChannelId}`);
+				const welcomeChannel = await client.channels.fetch(welcomeChannelId);
+				if (!welcomeChannel) {
+					log.warn(`[MEMBER JOIN] ❌ Welcome channel not found: ${welcomeChannelId}`);
+				} else if (!welcomeChannel.isTextBased()) {
+					log.warn(`[MEMBER JOIN] ❌ Welcome channel is not text-based: ${welcomeChannelId}`);
+				} else {
+					const welcomeMsg = WELCOME_MESSAGES[Math.floor(Math.random() * WELCOME_MESSAGES.length)];
+					log.debug(`[MEMBER JOIN] Creating welcome embed: "${welcomeMsg.title}"`);
+					const welcomeEmbed = new EmbedBuilder()
+						.setTitle(welcomeMsg.title)
+						.setDescription(welcomeMsg.body.replace('{member}', `<@${member.user.id}>`))
+						.setColor(0x00e5cc)
+						.setFooter({ text: 'Voran Defense Systems' });
+
+					log.debug(`[MEMBER JOIN] Sending message to welcome channel`);
+					await (welcomeChannel as any).send({
+						content: `<@${member.user.id}>`,
+						embeds: [welcomeEmbed],
+						components: [buildVerifyButton()],
+					});
+					log.info(`[MEMBER JOIN] ✅ Welcome message sent to welcome channel for ${member.user.tag}`);
+				}
+			} catch (welcomeError) {
+				log.error(`[MEMBER JOIN] ❌ Failed to post to welcome channel (${welcomeChannelId}):`, welcomeError);
+			}
+		} else {
+			log.warn(`[MEMBER JOIN] ⚠️ WELCOME_CHANNEL_ID not set in environment`);
 		}
 	} catch (error) {
 		log.error(`[MEMBER JOIN] ❌ Unexpected error in guildMemberAdd handler:`, error);
