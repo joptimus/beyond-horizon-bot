@@ -169,3 +169,25 @@ export async function createBugIssue({ title, body }: { title: string; body: str
   });
   return res.data;
 }
+
+export async function createFeatureIssue({ title, body }: { title: string; body: string }) {
+  const res = await octokit.request("POST /repos/{owner}/{repo}/issues", {
+    owner,
+    repo,
+    title,
+    body,
+    labels: ["feature"]
+  });
+  return res.data;
+}
+
+export async function createFeedbackIssue({ title, body }: { title: string; body: string }) {
+  const res = await octokit.request("POST /repos/{owner}/{repo}/issues", {
+    owner,
+    repo,
+    title,
+    body,
+    labels: ["feedback"]
+  });
+  return res.data;
+}

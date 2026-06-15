@@ -44,7 +44,7 @@ import { testConnectionOnStartup } from './repowiseMcp.js';
 import type { CodeContext } from './codeContextTypes.js';
 import { getIssueFromVoteMessage, linkVoteMessage } from './votes.js';
 // ---- GitHub helpers (issue + vote sync) ----
-import { createIdeaIssue, createBugIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas, extractSummaryFromIssueBody, fetchIssue } from './github.js';
+import { createIdeaIssue, createBugIssue, createFeatureIssue, createFeedbackIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas, extractSummaryFromIssueBody, fetchIssue } from './github.js';
 import { verifyDesignation, checkDiscordVerified } from './gameServer.js';
 
 // ======================
@@ -127,7 +127,18 @@ client.once(Events.ClientReady, (c) => {
 		// Only issue creation can throw (Discord side effects are best-effort inside
 		// the helpers), so one retry covers a transient GitHub failure; after that,
 		// tell the user their draft was lost instead of failing silently.
-		const post = () => (draft.type === 'bug' ? postBugFromPending(draft, true) : postIdeaFromPending(draft, true));
+		const post = () => {
+			switch (draft.type) {
+				case 'bug':
+					return postBugFromPending(draft, true);
+				case 'feature':
+					return postSimpleFromPending(draft, true, createFeatureIssue, 'feature request');
+				case 'feedback':
+					return postSimpleFromPending(draft, true, createFeedbackIssue, 'feedback');
+				default:
+					return postIdeaFromPending(draft, true);
+			}
+		};
 		try {
 			await post();
 		} catch (err) {
@@ -160,6 +171,139 @@ async function getOrStartIdeaThread(message: Message, title: string) {
 	// (Optional) leave a tiny pointer in the parent channel then delete it
 	// await message.reply({ content: `📌 Continued in thread: <#${thread.id}>` }).then(m => setTimeout(() => m.delete().catch(()=>{}), 5000)).catch(()=>{});
 	return thread;
+}
+
+// =====================================================================
+// !feature / !feedback — idea-like flows that reuse the idea AI
+// enrichment (enrichIdea/toIssueBody) but file to GitHub WITHOUT a vote
+// embed/reaction sync. They differ only by GitHub label, title/thread
+// prefix, and embed color, so one config + one handler drives both.
+// =====================================================================
+type SimpleFlowKey = 'feature' | 'feedback';
+const SIMPLE_FLOWS: Record<SimpleFlowKey, {
+	prefix: string; // title + thread tag, e.g. "FEATURE"
+	noun: string; // human label used in thread notices
+	color: number; // embed color
+	create: (p: { title: string; body: string }) => Promise<any>;
+}> = {
+	feature: { prefix: 'FEATURE', noun: 'feature request', color: 0x5865f2, create: createFeatureIssue },
+	feedback: { prefix: 'FEEDBACK', noun: 'feedback', color: 0xfaa61a, create: createFeedbackIssue },
+};
+
+// Thread starter for the simple flows (mirrors getOrStartIdeaThread but with a
+// configurable tag). Reuses the message's existing thread when there is one.
+async function getOrStartFlowThread(message: Message, prefix: string, title: string) {
+	if (message.channel.isThread()) return message.channel;
+	const name = `[${prefix}] ${title}`.slice(0, 95);
+	return message.startThread({ name, autoArchiveDuration: 1440 });
+}
+
+// Build the AI-enriched approval embed shared by the first-pass (no questions)
+// and post-answers paths. enriched is the idea-shaped JSON from enrichIdea.
+function buildSimpleApprovalEmbed(enriched: any, flow: { noun: string; color: number }): EmbedBuilder {
+	const previewImpl =
+		Array.isArray(enriched.implementationNotes) && enriched.implementationNotes.length
+			? enriched.implementationNotes.map((d: string) => `• ${d}`).join('\n')
+			: '• (to be refined)';
+	const previewTagLine =
+		Array.isArray(enriched.tags) && enriched.tags.length ? `\n**Tags**\n${enriched.tags.map((t: string) => `\`${t}\``).join(' ')}` : '';
+	return new EmbedBuilder()
+		.setTitle(enriched.title || flow.noun)
+		.setDescription(
+			[
+				`**Summary**\n${enriched.summary || '(missing)'}`,
+				`\n**Gameplay Impact**\n${enriched.gameplayImpact || '(unspecified)'}`,
+				`\n**Key Implementation Notes**\n${previewImpl}`,
+				previewTagLine,
+			].join('\n')
+		)
+		.setColor(flow.color);
+}
+
+// Handle a !feature/!feedback submission: enrich, then either ask the open
+// questions (Answer/Skip) or jump straight to the approval card — all inside a
+// thread, exactly like !idea but using the flow's prefix/color/namespace.
+async function handleSimpleFlowSubmission(message: Message, rawText: string, flowKey: SimpleFlowKey) {
+	const flow = SIMPLE_FLOWS[flowKey];
+	const submitterTag = `${message.author.username}#${message.author.discriminator}`;
+	// Acknowledge right away — code search + enrichment can take 20s+ and
+	// prefix commands have no deferReply equivalent.
+	(message.channel as any).sendTyping?.().catch(() => {});
+
+	const codeContext = await findCodePointers(rawText, 'idea');
+	const enriched = await enrichIdea(rawText, submitterTag, { codeContext });
+	const id = crypto.randomUUID();
+	const titleText = (enriched.title || rawText).slice(0, 80);
+
+	// Questions exist → ask to Answer or Skip (inside a thread)
+	if (enriched.openQuestions?.length) {
+		const questionsList = enriched.openQuestions
+			.slice(0, 5)
+			.map((q, i) => `**Q${i + 1}.** ${q}`)
+			.join('\n');
+
+		const qEmbed = new EmbedBuilder()
+			.setTitle(enriched.title || flow.noun)
+			.setDescription(`**Draft Summary**\n${enriched.summary}\n\n**Open Questions**\n${questionsList}`)
+			.setColor(flow.color);
+
+		const qRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+			new ButtonBuilder().setCustomId(`${flowKey}:answer:${id}`).setLabel('Answer questions').setStyle(ButtonStyle.Primary),
+			new ButtonBuilder().setCustomId(`${flowKey}:skip:${id}`).setLabel('Skip to approval').setStyle(ButtonStyle.Secondary)
+		);
+
+		const thread = await getOrStartFlowThread(message, flow.prefix, titleText);
+		const promptMsg = await thread.send({
+			content: `<@${message.author.id}> I have a few quick questions before finalizing. Answer now or skip:`,
+			embeds: [qEmbed],
+			components: [qRow],
+		});
+
+		putPending({
+			type: flowKey,
+			id,
+			authorId: message.author.id,
+			rawText,
+			title: `[${flow.prefix}] ${titleText}`,
+			body: toIssueBody(enriched, submitterTag, message.author.id, rawText, { codeContext }),
+			codeContext,
+			createdAt: Date.now(),
+			openQuestions: enriched.openQuestions.slice(0, 5),
+			phase: 'awaiting_answers',
+			...({ enriched } as any),
+			...({ sourceMessageId: promptMsg.id, sourceChannelId: thread.id, threadId: thread.id, parentChannelId: message.channelId } as any),
+		});
+
+		return;
+	}
+
+	// No questions → straight to approval (in a thread)
+	const thread = await getOrStartFlowThread(message, flow.prefix, titleText);
+
+	putPending({
+		type: flowKey,
+		id,
+		authorId: message.author.id,
+		rawText,
+		title: `[${flow.prefix}] ${titleText}`,
+		body: toIssueBody(enriched, submitterTag, message.author.id, rawText, { codeContext }),
+		codeContext,
+		createdAt: Date.now(),
+		phase: 'awaiting_approval',
+		...({ enriched } as any),
+		...({ sourceChannelId: thread.id, threadId: thread.id, parentChannelId: message.channelId } as any),
+	});
+
+	const previewRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+		new ButtonBuilder().setCustomId(`${flowKey}:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+		new ButtonBuilder().setCustomId(`${flowKey}:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+	);
+
+	await thread.send({
+		content: "Here's the AI-enriched draft. Approve to post.",
+		embeds: [buildSimpleApprovalEmbed(enriched, flow)],
+		components: [previewRow],
+	});
 }
 
 // ======================
@@ -469,6 +613,17 @@ client.on(Events.MessageCreate, async (message: Message) => {
 
 			return;
 		}
+
+		// -------- !feature / !feedback (idea-like enrichment, no voting) --------
+		if (command === 'feature' || command === 'feedback') {
+			if (!message.guild) return message.reply('❌ Use this in a server channel.');
+
+			const rawText = args.join(' ').trim();
+			if (!rawText) return message.reply(`❗ Usage: \`!${command} <your ${SIMPLE_FLOWS[command].noun}>\``);
+
+			await handleSimpleFlowSubmission(message, rawText, command);
+			return;
+		}
 	} catch (e: any) {
 		console.error('Prefix handler error:', e);
 		if (message.channel?.isTextBased()) {
@@ -664,6 +819,85 @@ async function handleComponentInteraction(i: Interaction) {
 				return i.update({ content: 'Bug report **canceled**.', components: [], embeds: [] });
 			}
 		}
+
+			// ----- FEATURE / FEEDBACK BUTTONS -----
+			if (ns === 'feature' || ns === 'feedback') {
+				const flow = SIMPLE_FLOWS[ns as SimpleFlowKey];
+				const pending = getPending(id);
+				if (!pending) return i.reply({ content: '⌛ This draft is no longer pending — it expired (expired drafts are auto-filed to GitHub; check the thread) or was already posted.', ephemeral: true });
+				if (i.user.id !== pending.authorId) {
+					return i.reply({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+				}
+
+				// Show modal to answer questions
+				if (action === 'answer') {
+					const qs = (pending as any).openQuestions || [];
+					if (!qs.length) return i.reply({ content: 'No questions to answer.', ephemeral: true });
+
+					const modal = new ModalBuilder().setCustomId(`${ns}:answers:${id}`).setTitle('Answer questions (you can skip any)');
+
+					qs.slice(0, 5).forEach((q: string, idx: number) => {
+						const input = new TextInputBuilder()
+							.setCustomId(`q${idx + 1}`)
+							.setLabel(`Q${idx + 1}`)
+							.setStyle(TextInputStyle.Paragraph)
+							.setRequired(false)
+							.setPlaceholder(toPlaceholder(q))
+							.setMaxLength(1000);
+
+						modal.addComponents(new ActionRowBuilder<TextInputBuilder>().addComponents(input));
+					});
+
+					return i.showModal(modal);
+				}
+
+				// Skip questions → go to approval
+				if (action === 'skip') {
+					(pending as any).phase = 'awaiting_approval';
+					putPending(pending);
+
+					const embed = new EmbedBuilder()
+						.setTitle((pending as any).title.replace(new RegExp(`^\\[${flow.prefix}\\]\\s*`), ''))
+						.setDescription('You chose to skip questions. Approve to post.')
+						.setColor(flow.color);
+
+					const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+						new ButtonBuilder().setCustomId(`${ns}:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+						new ButtonBuilder().setCustomId(`${ns}:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+					);
+
+					return i.update({ content: 'Review the draft below.', embeds: [embed], components: [row] });
+				}
+
+				if (action === 'approve') {
+					// Claim the draft before any await so the expiry sweep can't file it concurrently.
+					delPending(id);
+					await clearOldPromptComponents(pending);
+					await i.update({ content: `Posting your ${flow.noun}...`, components: [], embeds: [] });
+
+					try {
+						const issue = await postSimpleFromPending(pending, false, flow.create, flow.noun);
+						return i.followUp({ content: `Done. ${flow.noun} #${issue.number} posted.`, ephemeral: true });
+					} catch (err) {
+						log.error(`[BUTTON] ${ns} approve failed:`, err);
+						// Hand the draft back with a fresh TTL so the user can retry (or expiry auto-files it).
+						pending.createdAt = Date.now();
+						putPending(pending);
+						const retryRow = new ActionRowBuilder<ButtonBuilder>().addComponents(
+							new ButtonBuilder().setCustomId(`${ns}:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+							new ButtonBuilder().setCustomId(`${ns}:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+						);
+						return i.editReply({ content: '⚠️ Posting to GitHub failed. Try again below.', components: [retryRow] }).catch(() => {});
+					}
+				}
+
+				// Cancel
+				if (action === 'cancel') {
+					await clearOldPromptComponents(pending);
+					delPending(id);
+					return i.update({ content: 'Draft **canceled**.', components: [], embeds: [] });
+				}
+			}
 
 		// ----- VERIFY BUTTON -----
 		if (i.customId === 'open_verify_modal') {
@@ -871,6 +1105,82 @@ async function handleComponentInteraction(i: Interaction) {
 			await i.editReply({
 				content: "Thanks! Here's the refined bug report. Approve to post.",
 				embeds: [embed],
+				components: [row],
+			});
+		}
+
+		// ----- FEATURE / FEEDBACK MODAL SUBMIT -----
+		if ((ns === 'feature' || ns === 'feedback') && action === 'answers') {
+			const flow = SIMPLE_FLOWS[ns as SimpleFlowKey];
+			const pending = getPending(id);
+			if (!pending) {
+				if (!i.replied && !i.deferred) {
+					return i.reply({ content: '⌛ This draft expired before you submitted — it was auto-filed to GitHub with the info we had. Check the thread for the link.', ephemeral: true });
+				}
+				return i.followUp({ content: '⌛ This draft expired before you submitted — it was auto-filed to GitHub with the info we had. Check the thread for the link.', ephemeral: true });
+			}
+			if (i.user.id !== pending.authorId) {
+				if (!i.replied && !i.deferred) {
+					return i.reply({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+				}
+				return i.followUp({ content: '⛔ Only the original submitter can continue this flow.', ephemeral: true });
+			}
+
+			// ✅ Acknowledge within ~3s to avoid "Unknown interaction"
+			if (!i.replied && !i.deferred) {
+				await i.deferReply({ ephemeral: false });
+			}
+
+			// Gather Q/A
+			const qs = (pending as any).openQuestions || [];
+			const qaLines: string[] = [];
+			qs.slice(0, 5).forEach((q: string, idx: number) => {
+				const ans = i.fields.getTextInputValue(`q${idx + 1}`) || '';
+				if (q || ans) {
+					qaLines.push(`Q${idx + 1}: ${q}`);
+					if (ans.trim()) qaLines.push(`A${idx + 1}: ${ans.trim()}`);
+				}
+			});
+			const answersText = qaLines.join('\n');
+
+			// Re-enrich with answers → pass previous JSON for refinement
+			const submitterTag = i.user.tag;
+			const previous = (pending as any).enriched || undefined;
+			const codeContext = ((pending as any).codeContext as CodeContext | null) || null;
+			const enriched2 = await enrichIdea((pending as any).rawText, submitterTag, { answersText, previous, codeContext });
+
+			// The sweep may have claimed and auto-filed this draft while we were
+			// re-enriching; re-inserting it would resurrect a stale, already-filed copy.
+			if (getPending(id) !== pending) {
+				return i.editReply({
+					content: '⌛ This draft expired while you were answering and was auto-filed to GitHub — check the thread for the issue link.',
+					embeds: [],
+					components: [],
+				});
+			}
+
+			const finalTitle = `[${flow.prefix}] ${(enriched2.title || (pending as any).rawText).slice(0, 80)}`;
+			const finalBody = toIssueBody(enriched2, submitterTag, i.user.id, (pending as any).rawText, { qa: answersText, codeContext });
+
+			(pending as any).title = finalTitle;
+			(pending as any).body = finalBody;
+			(pending as any).phase = 'awaiting_approval';
+			(pending as any).enriched = enriched2; // keep latest structured JSON
+			pending.answersText = answersText; // answered — suppresses the expiry "unanswered" appendix
+			pending.openQuestions = [];
+			putPending(pending);
+
+			const row = new ActionRowBuilder<ButtonBuilder>().addComponents(
+				new ButtonBuilder().setCustomId(`${ns}:approve:${id}`).setLabel('Approve & Post').setStyle(ButtonStyle.Success),
+				new ButtonBuilder().setCustomId(`${ns}:cancel:${id}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+			);
+
+			await clearOldPromptComponents(pending);
+
+			// ✅ Finish the deferred response
+			await i.editReply({
+				content: "Thanks! Here's the refined draft. Approve to post.",
+				embeds: [buildSimpleApprovalEmbed(enriched2, flow)],
 				components: [row],
 			});
 		}
@@ -1105,6 +1415,25 @@ async function postBugFromPending(pending: any, auto: boolean) {
 		auto
 			? `⏱️ Draft timed out — filed bug **#${issue.number}** with the info we had. ${issue.html_url}`
 			: `✅ Bug report posted to GitHub as issue **#${issue.number}**`
+	);
+	return issue;
+}
+
+// File a no-vote issue (feature/feedback) from a pending draft + thread notice.
+// Same shape as postBugFromPending; `create` and `noun` come from SIMPLE_FLOWS.
+async function postSimpleFromPending(
+	pending: any,
+	auto: boolean,
+	create: (p: { title: string; body: string }) => Promise<any>,
+	noun: string
+) {
+	const issue = await fileIssueOnce(pending, auto, create);
+	const thread = await resolveDraftThread(pending);
+	await sendThreadNotice(
+		thread,
+		auto
+			? `⏱️ Draft timed out — filed ${noun} **#${issue.number}** with the info we had. ${issue.html_url}`
+			: `✅ Created ${noun} **#${issue.number}** — ${issue.title}`
 	);
 	return issue;
 }

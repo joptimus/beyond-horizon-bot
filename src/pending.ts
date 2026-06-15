@@ -2,7 +2,7 @@
 import type { CodeContext } from "./codeContextTypes.js";
 
 export type PendingIdea = {
-  type: 'idea' | 'bug';
+  type: 'idea' | 'bug' | 'feature' | 'feedback';
   id: string;
   authorId: string;
   rawText: string;
