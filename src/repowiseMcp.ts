@@ -86,11 +86,50 @@ function resetConnection() {
   cachedTools = null;
 }
 
-async function listAllowedTools(): Promise<McpTool[]> {
-  if (cachedTools) return cachedTools;
+/**
+ * True when `err` looks like the server lost our session (SSE/Streamable HTTP
+ * both surface this when the long-lived stream was dropped — e.g. by an idle
+ * proxy timeout or a backend restart). The TS client wraps it as
+ * `Error POSTing to endpoint (HTTP 404): Could not find session`.
+ */
+function isStaleSessionError(err: unknown): boolean {
+  const msg = String((err as any)?.message ?? err).toLowerCase();
+  return (
+    msg.includes("could not find session") || // SSE transport (mcp/server/sse.py)
+    msg.includes("session not found") || // Streamable HTTP transport
+    msg.includes("no valid session") ||
+    msg.includes("missing session id") ||
+    msg.includes("session terminated") ||
+    msg.includes("(http 404)") ||
+    msg.includes("(http 400)")
+  );
+}
+
+/**
+ * Run an operation that depends on the live MCP session, transparently
+ * reconnecting once if the session was dropped. Any other failure drops the
+ * client (so the next call starts clean) and is surfaced unchanged.
+ */
+async function withSessionRetry<T>(label: string, op: () => Promise<T>): Promise<T> {
+  try {
+    return await op();
+  } catch (err) {
+    resetConnection();
+    if (!isStaleSessionError(err)) throw err;
+    console.warn(`[repowise] ${label}: session dropped, reconnecting and retrying once`);
+    return op();
+  }
+}
+
+async function fetchAllowedTools(): Promise<McpTool[]> {
   const client = await getClient();
   const res = await client.listTools();
-  cachedTools = filterAllowed((res.tools as McpTool[]) || [], ALLOWED_TOOLS);
+  return filterAllowed((res.tools as McpTool[]) || [], ALLOWED_TOOLS);
+}
+
+async function listAllowedTools(): Promise<McpTool[]> {
+  if (cachedTools) return cachedTools;
+  cachedTools = await withSessionRetry("listTools", fetchAllowedTools);
   return cachedTools;
 }
 
@@ -176,7 +215,7 @@ export async function testConnectionOnStartup(): Promise<void> {
 
 /** Call a repowise tool and return its text content (joined). Throws on failure. */
 export async function callTool(name: string, args: Record<string, unknown>): Promise<string> {
-  try {
+  return withSessionRetry(`callTool(${name})`, async () => {
     const client = await getClient();
     const res: any = await client.callTool({ name, arguments: args });
     const content = (res?.content || []) as Array<{ type: string; text?: string }>;
@@ -185,8 +224,5 @@ export async function callTool(name: string, args: Record<string, unknown>): Pro
       .map((c) => c.text)
       .join("\n")
       .trim();
-  } catch (err) {
-    resetConnection(); // drop a stale session so the next call reconnects
-    throw err;
-  }
+  });
 }
