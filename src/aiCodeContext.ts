@@ -13,6 +13,21 @@ const MAX_TOOL_CALLS = 5;
 const TIME_BUDGET_MS = 15_000;
 const PER_CALL_TIMEOUT_MS = 10_000;
 
+// Set DEBUG_CODE_CONTEXT=1 to trace the repowise<->OpenAI loop: which tools are
+// offered, what the model decides to call (and with what args), what repowise
+// returns, and the final answer. Off by default so normal runs stay quiet.
+const DEBUG = process.env.DEBUG_CODE_CONTEXT === "1" || process.env.DEBUG_CODE_CONTEXT === "true";
+
+// Truncate long blobs (tool output, prompts) so logs stay readable.
+function preview(s: string, max = 2000): string {
+  if (s.length <= max) return s;
+  return `${s.slice(0, max)}… [truncated ${s.length - max} of ${s.length} chars]`;
+}
+
+function dbg(...args: unknown[]): void {
+  if (DEBUG) console.log("[aiCodeContext]", ...args);
+}
+
 // The time budget is only checked between loop iterations and cannot interrupt
 // an in-flight await, so every network call is individually raced against a
 // timeout (the underlying request keeps running, but the submission moves on).
@@ -94,6 +109,8 @@ export async function findCodePointers(
 
   try {
     const tools = await deps.getTools();
+    dbg(`enabled, kind=${kind}. Tools offered to OpenAI (${tools.length}):`,
+      tools.map((t) => t.function.name).join(", ") || "(none)");
     if (!tools.length) return null; // nothing to search with
 
     const start = deps.now();
@@ -101,6 +118,7 @@ export async function findCodePointers(
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: `Kind: ${kind}\nPlayer report:\n"""${rawText}"""` },
     ];
+    dbg("Initial user message fed to OpenAI:", preview(messages[1].content as string));
 
     let toolCalls = 0;
     let forceFinal = false;
@@ -109,6 +127,9 @@ export async function findCodePointers(
       const outOfTime = deps.now() - start > TIME_BUDGET_MS;
       const outOfCalls = toolCalls >= MAX_TOOL_CALLS;
       forceFinal = forceFinal || outOfTime || outOfCalls;
+
+      dbg(`OpenAI request: forceFinal=${forceFinal}, toolCalls so far=${toolCalls}, ` +
+        `messages=${messages.length}, tools offered=${forceFinal ? 0 : tools.length}`);
 
       const res = await withTimeout(
         deps.createCompletion({
@@ -127,6 +148,8 @@ export async function findCodePointers(
       if (!msg) return null;
 
       const calls = msg.tool_calls || [];
+      dbg(`OpenAI responded: ${calls.length} tool call(s) requested` +
+        (calls.length ? `: ${calls.map((c: any) => c.function?.name).join(", ")}` : ""));
       if (!forceFinal && calls.length) {
         messages.push(msg as ChatMessage);
         for (const call of calls) {
@@ -139,13 +162,17 @@ export async function findCodePointers(
             toolCalls++;
             try {
               const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
+              dbg(`→ calling repowise tool "${call.function.name}" with args:`, JSON.stringify(args));
               toolText = await withTimeout(
                 deps.callTool(call.function.name, args),
                 PER_CALL_TIMEOUT_MS,
                 `tool ${call.function.name}`
               );
+              dbg(`← repowise "${call.function.name}" returned (${toolText.length} chars):`,
+                preview(toolText));
             } catch (err) {
               toolText = `tool error: ${(err as Error).message}`;
+              dbg(`← repowise "${call.function.name}" FAILED:`, (err as Error).message);
             }
           }
           messages.push({ role: "tool", tool_call_id: call.id, content: toolText || "(no result)" });
@@ -154,13 +181,21 @@ export async function findCodePointers(
       }
 
       // Final answer expected here.
+      dbg("OpenAI final answer (raw):", preview(msg.content || "(empty)"));
       const parsed = parseFinal(msg.content || "");
-      if (parsed) return parsed;
+      if (parsed) {
+        dbg("Parsed CodeContext:", JSON.stringify(parsed));
+        return parsed;
+      }
 
       // Out of budget: don't spend another round trip nudging for valid JSON.
-      if (deps.now() - start > TIME_BUDGET_MS) return null;
+      if (deps.now() - start > TIME_BUDGET_MS) {
+        dbg("Final answer was not valid JSON and time budget exhausted — returning null.");
+        return null;
+      }
 
       // One retry: nudge for valid JSON, force final.
+      dbg("Final answer was not valid JSON — retrying once with a JSON-only nudge.");
       messages.push(msg as ChatMessage);
       messages.push({ role: "user", content: "Your previous reply was not valid JSON. Reply with ONLY the JSON object described, nothing else." });
       const retry = await withTimeout(
@@ -168,7 +203,11 @@ export async function findCodePointers(
         PER_CALL_TIMEOUT_MS,
         "completion (json retry)"
       );
-      return parseFinal(retry.choices[0]?.message?.content || "");
+      const retryContent = retry.choices[0]?.message?.content || "";
+      dbg("OpenAI retry answer (raw):", preview(retryContent || "(empty)"));
+      const retryParsed = parseFinal(retryContent);
+      dbg("Parsed CodeContext after retry:", retryParsed ? JSON.stringify(retryParsed) : "null");
+      return retryParsed;
     }
   } catch (err) {
     console.warn("[aiCodeContext] findCodePointers failed:", err);
