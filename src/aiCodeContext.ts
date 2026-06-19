@@ -13,6 +13,37 @@ const MAX_TOOL_CALLS = 5;
 const TIME_BUDGET_MS = 15_000;
 const PER_CALL_TIMEOUT_MS = 10_000;
 
+// Hard ceiling on the text of any single tool result fed back to OpenAI. The
+// useful header (overview/summary/signatures) comes first in every repowise
+// payload, so truncating the tail bounds context+cost without losing the lede.
+const MAX_TOOL_RESULT_CHARS = 6_000;
+
+// get_context defaults to compact=true, which for any file over ~80 lines emits
+// a "skeleton" with inlined function bodies (~8k tokens) and takes ~6s — enough
+// to blow the time budget on a single call. compact=false returns the symbol-
+// list card instead: just signatures + line numbers (a better "where to start"
+// map anyway), ~4x faster, no bodies. These opt-in "include" blocks pile extra
+// weight on top, so we strip them too.
+const GET_CONTEXT_HEAVY_INCLUDE = new Set([
+  "skeleton",
+  "callers",
+  "callees",
+  "metrics",
+  "community",
+  "full_doc",
+]);
+
+// Force get_context into its cheap, fast shape: compact=false + no heavy include
+// blocks. The model can't opt back into the expensive payload. Other tools and
+// args pass through untouched.
+function sanitizeToolArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
+  if (name !== "get_context") return args;
+  const include = Array.isArray(args.include)
+    ? (args.include as unknown[]).filter((b) => typeof b === "string" && !GET_CONTEXT_HEAVY_INCLUDE.has(b))
+    : args.include;
+  return { ...args, compact: false, include };
+}
+
 // Set DEBUG_CODE_CONTEXT=1 to trace the repowise<->OpenAI loop: which tools are
 // offered, what the model decides to call (and with what args), what repowise
 // returns, and the final answer. Off by default so normal runs stay quiet.
@@ -64,10 +95,16 @@ function getDefaultDeps(): FindDeps {
 
 const SYSTEM_PROMPT = `
 You are a senior engineer on a persistent, space-based MMO/RTS.
-Client: Unity (UI, rendering, input, game logic). Server: Node/TS (REST/WS, jobs, economy, state). Data: Postgres/Redis.
-The code is spread across multiple repositories indexed by a search service exposed as tools.
+The code is spread across several repositories, each indexed separately by the search tools. Pass the repo alias as the "repo" argument:
+- SpaceMMORPG — Unity client (C#, under Assets/Scripts/...): all UI, screens, panels, menus, rendering, input, client-side game logic.
+- game-server — Node/TS backend: REST/WS APIs, jobs, economy, build orders/construction, docking, persistent state (Postgres/Redis).
+- battle-server-rust — Rust combat/battle server.
+- viper-service — Rust routing engine.
+- bho-website-react — React marketing/website.
+Repo-scoping is critical. repo="all" fuses results across every repo and BURIES the relevant file — a UI request can rank below unrelated infra files. When you can tell which area an idea/bug touches, search that repo directly: UI / screens / menus → SpaceMMORPG; economy / build / jobs / API → game-server; combat → battle-server-rust. Use repo="all" only as a last resort when you genuinely can't tell.
+Many features span repos. A UI that shows a build time = SpaceMMORPG (where to display it) + game-server (where build time is computed) — search each relevant repo with its own query rather than one "all" query.
 Your job: given a player's idea or bug report, locate the most relevant code and produce a concise pointer list a developer can start from.
-Use the tools to search; refine queries based on results. Be efficient — a few targeted searches, not exhaustive crawling.
+Use the tools to search; refine queries based on results. Be efficient — a few targeted, repo-scoped searches, not exhaustive crawling.
 When done, STOP calling tools and reply with ONLY a JSON object of this exact shape (no prose, no code fences):
 {
   "whereToStart": [ { "repo": "...", "path": "...", "symbol": "optional", "reason": "why a dev starts here" } ],
@@ -161,15 +198,21 @@ export async function findCodePointers(
           } else {
             toolCalls++;
             try {
-              const args = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
+              const rawArgs = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
+              const args = sanitizeToolArgs(call.function.name, rawArgs);
               dbg(`→ calling repowise tool "${call.function.name}" with args:`, JSON.stringify(args));
-              toolText = await withTimeout(
+              const full = await withTimeout(
                 deps.callTool(call.function.name, args),
                 PER_CALL_TIMEOUT_MS,
                 `tool ${call.function.name}`
               );
-              dbg(`← repowise "${call.function.name}" returned (${toolText.length} chars):`,
-                preview(toolText));
+              toolText =
+                full.length > MAX_TOOL_RESULT_CHARS
+                  ? `${full.slice(0, MAX_TOOL_RESULT_CHARS)}\n…[truncated ${full.length - MAX_TOOL_RESULT_CHARS} of ${full.length} chars]`
+                  : full;
+              dbg(`← repowise "${call.function.name}" returned ${full.length} chars` +
+                (full.length > MAX_TOOL_RESULT_CHARS ? ` (capped to ${MAX_TOOL_RESULT_CHARS})` : "") +
+                `:`, preview(toolText));
             } catch (err) {
               toolText = `tool error: ${(err as Error).message}`;
               dbg(`← repowise "${call.function.name}" FAILED:`, (err as Error).message);
