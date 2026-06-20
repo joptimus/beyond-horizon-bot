@@ -37,7 +37,7 @@ const idea: Enriched = {
 
 describe("toIssueBody (idea)", () => {
   it("inserts Where to Start after Scope when codeContext is present", () => {
-    const body = toIssueBody(idea, "user#1", "123", "raw idea", undefined, ctx);
+    const body = toIssueBody(idea, "user#1", "123", "raw idea", { codeContext: ctx });
     expect(body).toContain("**Where to Start**");
     expect(body).toContain("`game-server`");
     expect(body.indexOf("**Where to Start**")).toBeGreaterThan(body.indexOf("**Database**"));
@@ -62,7 +62,7 @@ const bug: EnrichedBug = {
 
 describe("toBugIssueBody (revamp)", () => {
   it("renders Where to Start, Suspected cause and Affected Systems when codeContext present", () => {
-    const body = toBugIssueBody(bug, "user#1", "raw bug text", "Q: in-system or jump-gate?\nA: jump gate", ctx);
+    const body = toBugIssueBody(bug, "user#1", { raw: "raw bug text", qa: "Q: in-system or jump-gate?\nA: jump gate", codeContext: ctx });
     expect(body).toContain("## Where to Start");
     expect(body).toContain("**Suspected cause:** warp state never clears on jump-gate path");
     expect(body).toContain("## Affected Systems");
@@ -74,7 +74,7 @@ describe("toBugIssueBody (revamp)", () => {
   });
 
   it("omits code sections and clarifications when absent (no 'Not specified' noise)", () => {
-    const body = toBugIssueBody(bug, "user#1", "raw bug text");
+    const body = toBugIssueBody(bug, "user#1", { raw: "raw bug text" });
     expect(body).not.toContain("## Where to Start");
     expect(body).not.toContain("Suspected cause");
     expect(body).not.toContain("## Affected Systems");

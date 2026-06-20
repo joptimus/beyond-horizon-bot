@@ -29,11 +29,13 @@ describe("sweepExpired", () => {
     expect(getPending("b")).toBeUndefined();
   });
 
-  it("retries once and keeps the draft if both attempts fail", async () => {
+  it("invokes onExpire once and drops the draft even if it throws", async () => {
     putPending(draft("c", 0));
     const onExpire = vi.fn(async () => { throw new Error("github down"); });
     await sweepExpired(11 * 60_000, onExpire);
-    expect(onExpire).toHaveBeenCalledTimes(2); // initial + one retry
-    expect(getPending("c")).toBeUndefined(); // dropped after failed retry (no infinite growth)
+    // sweep deletes up-front and calls onExpire once; the retry-once lives in the
+    // bot.ts onExpire callback now (hardened against races / duplicate issues).
+    expect(onExpire).toHaveBeenCalledOnce();
+    expect(getPending("c")).toBeUndefined();
   });
 });

@@ -44,7 +44,8 @@ import { testConnectionOnStartup } from './repowiseMcp.js';
 import type { CodeContext } from './codeContextTypes.js';
 import { getIssueFromVoteMessage, linkVoteMessage } from './votes.js';
 // ---- GitHub helpers (issue + vote sync) ----
-import { createIdeaIssue, createBugIssue, createFeatureIssue, createFeedbackIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas, extractSummaryFromIssueBody, fetchIssue } from './github.js';
+import { createIdeaIssue, createBugIssue, createFeatureIssue, createFeedbackIssue, upsertDiscordVoteComment, readDiscordVoteCount, listTopIdeas, extractSummaryFromIssueBody, fetchIssue, listClosedTrackedIssues, repoHasAnnouncedLabel, ensureAnnouncedLabel, markIssueAnnounced } from './github.js';
+import { isAnnounceable, parseDiscordId, renderShippedMessage } from './shipped.js';
 import { verifyDesignation, checkDiscordVerified } from './gameServer.js';
 
 // ======================
@@ -118,6 +119,112 @@ function buildVerifyButton(): ActionRowBuilder<ButtonBuilder> {
 	);
 }
 
+// ======================
+// "Shipped" announcer — notify submitters when their issue closes as completed.
+// Polls GitHub (no webhook/web server); state lives in the `announced` label so
+// it survives restarts. See docs/plans/2026-06-20-shipped-announcements-design.md
+// ======================
+
+function buildShippedEmbed(issueTitle: string, issueUrl: string, memberId: string) {
+	const msg = renderShippedMessage({ issueTitle, issueUrl, memberId });
+	return new EmbedBuilder()
+		.setTitle(msg.title)
+		.setDescription(msg.description)
+		.setColor(0x00e5cc)
+		.setFooter({ text: 'Voran Defense Systems' });
+}
+
+// On first run (no `announced` label yet), stamp the existing closed-issue
+// backlog as announced WITHOUT messaging anyone, so we never spam old submitters.
+async function seedAnnouncedBacklogIfFirstRun() {
+	if (await repoHasAnnouncedLabel()) {
+		log.debug('[SHIPPED] `announced` label already exists — skipping backlog seed');
+		return;
+	}
+	log.info('[SHIPPED] First run detected — seeding existing closed issues as announced (no messages sent)');
+	await ensureAnnouncedLabel(); // create the label even if the backlog is empty
+	const backlog = (await listClosedTrackedIssues()).filter(isAnnounceable);
+	for (const issue of backlog) {
+		try {
+			await markIssueAnnounced(issue.number);
+		} catch (e) {
+			log.warn(`[SHIPPED] Seed: failed to label #${issue.number}:`, e);
+		}
+	}
+	log.info(`[SHIPPED] Seed complete — ${backlog.length} backlog issue(s) marked announced`);
+}
+
+async function announceShippedIssue(issue: { number: number; title: string; html_url: string; body: string | null }) {
+	const memberId = parseDiscordId(issue.body);
+	if (!memberId) return; // no submitter to notify (isAnnounceable already guards this)
+
+	const embed = buildShippedEmbed(issue.title, issue.html_url, memberId);
+	let notified = false;
+
+	// 1. Public channel post
+	const channelId = process.env.ANNOUNCE_CHANNEL_ID;
+	if (channelId) {
+		try {
+			const channel = await client.channels.fetch(channelId);
+			if (channel && channel.isTextBased()) {
+				await (channel as any).send({ content: `<@${memberId}>`, embeds: [embed] });
+				notified = true;
+				log.info(`[SHIPPED] Announced #${issue.number} in channel for <@${memberId}>`);
+			} else {
+				log.warn(`[SHIPPED] ANNOUNCE_CHANNEL_ID ${channelId} is missing or not text-based`);
+			}
+		} catch (e) {
+			log.error(`[SHIPPED] Failed to post #${issue.number} to announce channel:`, e);
+		}
+	} else {
+		log.warn('[SHIPPED] ANNOUNCE_CHANNEL_ID not set — falling back to DM only');
+	}
+
+	// 2. DM the submitter (non-fatal if DMs are disabled, like the join flow)
+	try {
+		const user = await client.users.fetch(memberId);
+		await user.send({ embeds: [embed] });
+		notified = true;
+		log.info(`[SHIPPED] DM sent for #${issue.number} to ${memberId}`);
+	} catch (e) {
+		log.warn(`[SHIPPED] Could not DM ${memberId} for #${issue.number} (likely DMs disabled):`, e);
+	}
+
+	// 3. Only mark announced once the submitter was reached somehow, so a total
+	//    failure retries next poll instead of being silently swallowed.
+	if (notified) {
+		try {
+			await markIssueAnnounced(issue.number);
+		} catch (e) {
+			log.error(`[SHIPPED] Failed to mark #${issue.number} announced (may re-announce next poll):`, e);
+		}
+	}
+}
+
+async function pollShippedOnce() {
+	const announceable = (await listClosedTrackedIssues()).filter(isAnnounceable);
+	if (announceable.length) {
+		log.info(`[SHIPPED] ${announceable.length} newly completed issue(s) to announce`);
+	}
+	for (const issue of announceable) {
+		await announceShippedIssue(issue);
+	}
+}
+
+async function startShippedAnnouncer() {
+	try {
+		await seedAnnouncedBacklogIfFirstRun();
+		await pollShippedOnce(); // run once at startup
+	} catch (e) {
+		log.error('[SHIPPED] Startup seed/poll failed:', e);
+	}
+	const minutes = Number(process.env.SHIPPED_POLL_MINUTES) || 10;
+	setInterval(() => {
+		pollShippedOnce().catch((e) => log.error('[SHIPPED] Poll cycle failed:', e));
+	}, minutes * 60_000);
+	log.info(`[SHIPPED] Announcer running — polling every ${minutes} min`);
+}
+
 client.once(Events.ClientReady, (c) => {
 	console.log(`🤖 Logged in as ${c.user.tag}`);
 	// Register the expiry handler before startApi so a startup failure there can
@@ -154,6 +261,8 @@ client.once(Events.ClientReady, (c) => {
 	startApi(client);
 	// Diagnostic only — never blocks startup; logs CF Access / MCP connectivity.
 	testConnectionOnStartup().catch((err) => console.error('[repowise] startup test crashed:', err));
+	// Start the "shipped" announcer (seed backlog on first run, then poll).
+	startShippedAnnouncer().catch((err) => log.error('[SHIPPED] Failed to start announcer:', err));
 });
 
 // Create a public thread off the invoking message (prefix flow)
@@ -1492,9 +1601,9 @@ client.on(Events.MessageReactionRemove, async (reaction, user) => {
 // Member Join Flow (Welcome DM + Verify Channel Post)
 // ======================
 
-// Voran-themed welcome messages. One is picked at random per join so the
-// welcome channel doesn't feel repetitive. `{member}` is replaced with the
-// new member's mention.
+// Voran-themed welcome messages. One is picked per join so the welcome
+// channel doesn't feel repetitive. `{member}` is replaced with the new
+// member's mention. See pickWelcomeMessage() for the selection logic.
 const WELCOME_MESSAGES: ReadonlyArray<{ title: string; body: string }> = [
 	{
 		title: 'A New Commander Arrives',
@@ -1529,6 +1638,25 @@ const WELCOME_MESSAGES: ReadonlyArray<{ title: string; body: string }> = [
 		body: '{member} joins the ranks. The frontier rewards the bold, and there\'s a place for you among the stars. Link your callsign to step into the fold.',
 	},
 ];
+
+// Index of the last welcome message used. Pure Math.random() repeats the same
+// message ~1-in-8 of the time, so we remember the last pick and choose a
+// different one each join. In-memory only: after a restart the worst case is a
+// single repeat of the pre-restart message, which is negligible.
+let lastWelcomeIndex = -1;
+
+function pickWelcomeMessage(): { title: string; body: string } {
+	if (WELCOME_MESSAGES.length <= 1) {
+		return WELCOME_MESSAGES[0];
+	}
+	let index = Math.floor(Math.random() * WELCOME_MESSAGES.length);
+	if (index === lastWelcomeIndex) {
+		// Skip forward one slot (wrapping) so we never repeat the last message.
+		index = (index + 1) % WELCOME_MESSAGES.length;
+	}
+	lastWelcomeIndex = index;
+	return WELCOME_MESSAGES[index];
+}
 
 client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
 	log.info(`[MEMBER JOIN] ${member.user.tag} (${member.user.id}) joined guild ${member.guild.id}`);
@@ -1613,7 +1741,7 @@ client.on(Events.GuildMemberAdd, async (member: GuildMember) => {
 				} else if (!welcomeChannel.isTextBased()) {
 					log.warn(`[MEMBER JOIN] ❌ Welcome channel is not text-based: ${welcomeChannelId}`);
 				} else {
-					const welcomeMsg = WELCOME_MESSAGES[Math.floor(Math.random() * WELCOME_MESSAGES.length)];
+					const welcomeMsg = pickWelcomeMessage();
 					log.debug(`[MEMBER JOIN] Creating welcome embed: "${welcomeMsg.title}"`);
 					const welcomeEmbed = new EmbedBuilder()
 						.setTitle(welcomeMsg.title)

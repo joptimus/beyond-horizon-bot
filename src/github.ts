@@ -1,5 +1,6 @@
 import { Octokit } from "octokit";
 import type { Env, IdeaIssue } from "./types.js";
+import { ANNOUNCED_LABEL, type GhIssueLite } from "./shipped.js";
 
 const REQUIRED = [
   "GITHUB_TOKEN",
@@ -77,6 +78,79 @@ export async function listTopIdeas(limit: number) {
     reactions: i.reactions || { "+1": 0 },
     labels: i.labels || [],
   }));
+}
+
+// --- "Shipped" announcement support ---
+
+// List closed issues (most-recently-updated first), shaped for shipped.ts to
+// filter. The issues endpoint also returns PRs; isAnnounceable() drops those.
+// A few pages is plenty given how rarely issues close.
+export async function listClosedTrackedIssues(): Promise<GhIssueLite[]> {
+  const out: GhIssueLite[] = [];
+  for (let page = 1; page <= 3; page++) {
+    const res = await octokit.request("GET /repos/{owner}/{repo}/issues", {
+      owner,
+      repo,
+      state: "closed",
+      sort: "updated",
+      direction: "desc",
+      per_page: 100,
+      page,
+    });
+    const batch = res.data as any[];
+    out.push(...(batch as GhIssueLite[]));
+    if (batch.length < 100) break;
+  }
+  return out;
+}
+
+// Create the `announced` label if it doesn't exist (idempotent).
+export async function ensureAnnouncedLabel(): Promise<void> {
+  try {
+    await octokit.request("POST /repos/{owner}/{repo}/labels", {
+      owner,
+      repo,
+      name: ANNOUNCED_LABEL,
+      color: "8b5cf6",
+      description: "Shipped — submitter has been notified",
+    });
+  } catch (_) {
+    /* already exists */
+  }
+}
+
+// Whether the `announced` label exists in the repo — used to detect first run
+// so we can silently seed the backlog instead of announcing it.
+export async function repoHasAnnouncedLabel(): Promise<boolean> {
+  try {
+    await octokit.request("GET /repos/{owner}/{repo}/labels/{name}", {
+      owner,
+      repo,
+      name: ANNOUNCED_LABEL,
+    });
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Stamp the `announced` label on an issue, preserving its other labels.
+export async function markIssueAnnounced(issueNumber: number): Promise<void> {
+  await ensureAnnouncedLabel();
+  const { data: issue } = await octokit.request(
+    "GET /repos/{owner}/{repo}/issues/{issue_number}",
+    { owner, repo, issue_number: issueNumber }
+  );
+  const names = (issue.labels || []).map((l: any) =>
+    typeof l === "string" ? l : l.name
+  );
+  if (names.includes(ANNOUNCED_LABEL)) return;
+  await octokit.request("PUT /repos/{owner}/{repo}/issues/{issue_number}/labels", {
+    owner,
+    repo,
+    issue_number: issueNumber,
+    labels: [...names, ANNOUNCED_LABEL],
+  });
 }
 
 // --- Discord vote comment management ---
