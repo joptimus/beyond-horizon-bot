@@ -67,6 +67,10 @@ Rules:
 - Write in player terms. NEVER mention file names, function names, commit scopes,
   repo names, internal version numbers, or words like 'refactor'/'commit'/'server-side'.
 - Group related changes; merge duplicates; omit anything with no visible player effect.
+- EXCLUDE changes to the game's own update/release machinery — the launcher,
+  the news / patch-notes system itself, CI, build, deploy, versioning, tests, and
+  developer tooling. Players never experience these; do not mention them even as a
+  benefit (e.g. never write "patch notes are now cleaner / de-duplicated").
 - Keep it concise: a title plus 2-8 short bullets. No preamble, no sign-off.
 - If NOTHING in the bundle affects players (only internal/tooling changes), set
   hasPlayerImpact to false and return empty strings for title and body.
