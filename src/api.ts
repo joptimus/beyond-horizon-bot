@@ -11,6 +11,7 @@ import statsRoute, { trackMessage } from './routes/stats.js';
 import leaderboardRoute from './routes/leaderboard.js';
 import schedulesRoute from './routes/schedules.js';
 import activityRoute from './routes/activity.js';
+import releaseNoteRoute from './routes/releaseNote.js';
 
 export function startApi(client: Client) {
 	const app = express();
@@ -36,6 +37,7 @@ export function startApi(client: Client) {
 	app.use('/leaderboard', leaderboardRoute);
 	app.use('/schedules', schedulesRoute);
 	app.use('/activity', activityRoute);
+	app.use('/release-note', releaseNoteRoute);
 
 	app.listen(port, () => {
 		console.log(`📡 API listening on port ${port}`);
