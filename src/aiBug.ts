@@ -159,6 +159,7 @@ export type BugIssueBodyOpts = {
 export function toBugIssueBody(
   bug: EnrichedBug,
   userTag: string,
+  userId: string,
   opts: BugIssueBodyOpts = {}
 ): string {
   const { raw, qa, codeContext } = opts;
@@ -201,6 +202,6 @@ export function toBugIssueBody(
 
   let body = parts.join("\n\n");
   if (raw && raw.trim()) body += `\n\n---\n**Original Report**\n> ${raw.trim()}`;
-  body += `\n\n*Reported via Discord by ${userTag}*\n`;
+  body += `\n\n*Reported via Discord by ${userTag}* (Discord ID: ${userId})\n`;
   return body;
 }

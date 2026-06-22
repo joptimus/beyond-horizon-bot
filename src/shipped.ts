@@ -56,7 +56,7 @@ export function isAnnounceable(issue: GhIssueLite): boolean {
 // wraps them in an EmbedBuilder so this stays pure/testable.
 export function renderShippedMessage(opts: {
   issueTitle: string;
-  issueUrl: string;
+  issueNumber: number;
   memberId: string;
 }): { title: string; description: string } {
   return {
@@ -64,7 +64,7 @@ export function renderShippedMessage(opts: {
     description:
       `<@${opts.memberId}>, your report has been actioned by the fleet engineers.\n\n` +
       `**${opts.issueTitle}** is now resolved and slated for an upcoming release.\n\n` +
-      `Track the work: ${opts.issueUrl}\n\n` +
+      `Status: Github issue #${opts.issueNumber} has been closed.\n\n` +
       `The horizon advances because commanders like you chart the way.`,
   };
 }

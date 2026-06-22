@@ -125,8 +125,8 @@ function buildVerifyButton(): ActionRowBuilder<ButtonBuilder> {
 // it survives restarts. See docs/plans/2026-06-20-shipped-announcements-design.md
 // ======================
 
-function buildShippedEmbed(issueTitle: string, issueUrl: string, memberId: string) {
-	const msg = renderShippedMessage({ issueTitle, issueUrl, memberId });
+function buildShippedEmbed(issueTitle: string, issueNumber: number, memberId: string) {
+	const msg = renderShippedMessage({ issueTitle, issueNumber, memberId });
 	return new EmbedBuilder()
 		.setTitle(msg.title)
 		.setDescription(msg.description)
@@ -158,7 +158,7 @@ async function announceShippedIssue(issue: { number: number; title: string; html
 	const memberId = parseDiscordId(issue.body);
 	if (!memberId) return; // no submitter to notify (isAnnounceable already guards this)
 
-	const embed = buildShippedEmbed(issue.title, issue.html_url, memberId);
+	const embed = buildShippedEmbed(issue.title, issue.number, memberId);
 	let notified = false;
 
 	// 1. Public channel post
@@ -665,7 +665,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 					authorId: message.author.id,
 					rawText,
 					title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-					body: toBugIssueBody(enriched, submitterTag, { raw: rawText, codeContext }),
+					body: toBugIssueBody(enriched, submitterTag, message.author.id, { raw: rawText, codeContext }),
 					codeContext,
 					createdAt: Date.now(),
 					openQuestions: enriched.openQuestions.slice(0, 3),
@@ -684,7 +684,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 				authorId: message.author.id,
 				rawText,
 				title: `[BUG] ${(enriched.title || rawText).slice(0, 80)}`,
-				body: toBugIssueBody(enriched, submitterTag, { raw: rawText, codeContext }),
+				body: toBugIssueBody(enriched, submitterTag, message.author.id, { raw: rawText, codeContext }),
 				codeContext,
 				createdAt: Date.now(),
 				phase: 'awaiting_approval',
@@ -1177,7 +1177,7 @@ async function handleComponentInteraction(i: Interaction) {
 			}
 
 			const finalTitle = `[BUG] ${(enriched2.title || (pending as any).rawText).slice(0, 80)}`;
-			const finalBody = toBugIssueBody(enriched2, submitterTag, { raw: (pending as any).rawText, qa: answersText, codeContext });
+			const finalBody = toBugIssueBody(enriched2, submitterTag, i.user.id, { raw: (pending as any).rawText, qa: answersText, codeContext });
 
 			(pending as any).title = finalTitle;
 			(pending as any).body = finalBody;

@@ -62,7 +62,7 @@ const bug: EnrichedBug = {
 
 describe("toBugIssueBody (revamp)", () => {
   it("renders Where to Start, Suspected cause and Affected Systems when codeContext present", () => {
-    const body = toBugIssueBody(bug, "user#1", { raw: "raw bug text", qa: "Q: in-system or jump-gate?\nA: jump gate", codeContext: ctx });
+    const body = toBugIssueBody(bug, "user#1", "123", { raw: "raw bug text", qa: "Q: in-system or jump-gate?\nA: jump gate", codeContext: ctx });
     expect(body).toContain("## Where to Start");
     expect(body).toContain("**Suspected cause:** warp state never clears on jump-gate path");
     expect(body).toContain("## Affected Systems");
@@ -70,11 +70,11 @@ describe("toBugIssueBody (revamp)", () => {
     expect(body).toContain("## Player Clarifications");
     expect(body).toContain("Q: in-system or jump-gate?");
     expect(body).toContain("> raw bug text");
-    expect(body).toContain("*Reported via Discord by user#1*");
+    expect(body).toContain("*Reported via Discord by user#1* (Discord ID: 123)");
   });
 
   it("omits code sections and clarifications when absent (no 'Not specified' noise)", () => {
-    const body = toBugIssueBody(bug, "user#1", { raw: "raw bug text" });
+    const body = toBugIssueBody(bug, "user#1", "123", { raw: "raw bug text" });
     expect(body).not.toContain("## Where to Start");
     expect(body).not.toContain("Suspected cause");
     expect(body).not.toContain("## Affected Systems");

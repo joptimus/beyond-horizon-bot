@@ -79,16 +79,26 @@ describe("isAnnounceable", () => {
 });
 
 describe("renderShippedMessage", () => {
-  it("mentions the submitter, the issue title, the link, and a release", () => {
+  it("mentions the submitter, the issue title, a closed-status line, and a release", () => {
     const msg = renderShippedMessage({
       issueTitle: "Fleet warp queue",
-      issueUrl: "https://github.com/o/r/issues/42",
+      issueNumber: 42,
       memberId: "123456789012345678",
     });
     expect(msg.description).toContain("<@123456789012345678>");
     expect(msg.description).toContain("Fleet warp queue");
-    expect(msg.description).toContain("https://github.com/o/r/issues/42");
+    expect(msg.description).toContain("Status: Github issue #42 has been closed.");
     expect(msg.description.toLowerCase()).toContain("release");
     expect(msg.title.length).toBeGreaterThan(0);
+  });
+
+  it("does not leak the GitHub issue URL to players", () => {
+    const msg = renderShippedMessage({
+      issueTitle: "Fleet warp queue",
+      issueNumber: 42,
+      memberId: "123456789012345678",
+    });
+    expect(msg.description).not.toContain("github.com");
+    expect(msg.description).not.toContain("http");
   });
 });
