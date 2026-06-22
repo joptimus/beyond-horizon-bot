@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { generateReleaseNote, bundleCommitCount, type ReleaseBundle } from '../aiReleaseNote.js';
+import { generateReleaseNote, translateReleaseNote, bundleCommitCount, type ReleaseBundle, type NoteTranslation } from '../aiReleaseNote.js';
 import { postLauncherNews } from '../gameNews.js';
 
 const router = Router();
@@ -27,10 +27,19 @@ router.post('/', async (req, res) => {
 			return res.json({ status: 'skipped', reason: 'no player-facing changes' });
 		}
 
+		// Translation is best-effort: a failure here must never block the English note.
+		let translations: NoteTranslation[] = [];
+		try {
+			translations = await translateReleaseNote(note.title, note.body);
+		} catch (err: any) {
+			console.error('[ReleaseNote] translation failed, posting English only:', err?.message || err);
+		}
+
 		const result = await postLauncherNews({
 			title: note.title,
 			body: note.body,
 			version_tag: bundle.client_tag,
+			translations,
 		});
 		return res.json({ status: 'published', id: result.id, deduped: result.deduped });
 	} catch (err: any) {

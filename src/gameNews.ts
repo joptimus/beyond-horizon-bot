@@ -25,11 +25,18 @@ async function adminLogin(): Promise<string> {
 	return data.token;
 }
 
+export interface NewsTranslation {
+	lang_code: string;
+	title: string;
+	body: string;
+}
+
 export interface NewsPost {
 	title: string;
 	body: string;
 	version_tag: string;
 	category?: string;
+	translations?: NewsTranslation[];
 }
 
 export interface NewsResult {
@@ -39,7 +46,7 @@ export interface NewsResult {
 
 export async function postLauncherNews(post: NewsPost): Promise<NewsResult> {
 	const token = await adminLogin();
-	log.info(`-> POST /api/admin/news (version_tag=${post.version_tag})`);
+	log.info(`-> POST /api/admin/news (version_tag=${post.version_tag}, translations=${post.translations?.length ?? 0})`);
 
 	const res = await fetch(`${BASE_URL}/api/admin/news`, {
 		method: 'POST',
@@ -49,6 +56,7 @@ export async function postLauncherNews(post: NewsPost): Promise<NewsResult> {
 			body: post.body,
 			category: post.category || 'patch',
 			version_tag: post.version_tag,
+			translations: post.translations ?? [],
 		}),
 	});
 

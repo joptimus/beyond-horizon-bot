@@ -119,3 +119,67 @@ export async function generateReleaseNote(bundle: ReleaseBundle): Promise<Releas
     body: typeof parsed.body === "string" ? parsed.body.trim() : "",
   };
 }
+
+// Launcher-supported languages minus English (the base note IS English). The
+// launcher resolves selected-language -> English fallback, so any language we
+// fail to produce here simply falls back to the English note server-side.
+const TARGET_LANGS: { code: string; name: string }[] = [
+  { code: "es", name: "Spanish" },
+  { code: "fr", name: "French" },
+  { code: "de", name: "German" },
+  { code: "pt", name: "Portuguese" },
+  { code: "ja", name: "Japanese" },
+  { code: "zh", name: "Simplified Chinese" },
+  { code: "ko", name: "Korean" },
+];
+
+export interface NoteTranslation {
+  lang_code: string;
+  title: string;
+  body: string;
+}
+
+const TRANSLATE_RULES = `
+Return ONLY valid JSON keyed by language code, each value an object with the
+translated title and body:
+{ "es": { "title": "...", "body": "..." }, "fr": { "title": "...", "body": "..." }, ... }
+Rules:
+- The body is Markdown. Preserve its structure EXACTLY: same bullet markers, line
+  breaks, and bold/italic/link syntax. Do NOT translate URLs or text inside backticks.
+- Translate naturally for players and keep the upbeat tone. Title stays <= 70 chars.
+- Include EVERY requested language code as a top-level key. Output only JSON.
+`;
+
+// Machine-translates one English launcher note into the target languages. Reuses
+// the shared OpenAI client. A partial/garbled model response is tolerated (bad JSON
+// -> [], missing/malformed languages dropped; English fallback covers them), but the
+// OpenAI call itself may throw on network/auth/rate-limit — the caller treats the
+// whole step as best-effort and posts the English note regardless.
+export async function translateReleaseNote(title: string, body: string): Promise<NoteTranslation[]> {
+  const langList = TARGET_LANGS.map((l) => `${l.code} = ${l.name}`).join(", ");
+  const res = await getOpenAiClient().chat.completions.create({
+    model: OPENAI_MODEL,
+    temperature: 0.3,
+    response_format: { type: "json_object" } as any,
+    messages: [
+      { role: "system", content: SYSTEM_PREFACE },
+      { role: "user", content: `Target languages: ${langList}\n\nTitle: ${title}\n\nBody:\n${body}\n${TRANSLATE_RULES}` },
+    ],
+  });
+
+  let parsed: any;
+  try {
+    parsed = JSON.parse(stripFences(res.choices[0]?.message?.content || "{}"));
+  } catch {
+    return [];
+  }
+
+  const out: NoteTranslation[] = [];
+  for (const { code } of TARGET_LANGS) {
+    const t = parsed?.[code];
+    if (t && typeof t.title === "string" && typeof t.body === "string" && t.title.trim() && t.body.trim()) {
+      out.push({ lang_code: code, title: t.title.trim(), body: t.body.trim() });
+    }
+  }
+  return out;
+}
