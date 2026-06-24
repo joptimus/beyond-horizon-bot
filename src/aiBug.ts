@@ -2,7 +2,7 @@
 import OpenAI from "openai";
 import type { CodeContext } from "./codeContextTypes.js";
 import { renderWhereToStart } from "./codeContextTypes.js";
-import { getOpenAiClient, OPENAI_MODEL, stripFences, codeContextBlock } from "./aiShared.js";
+import { getOpenAiClient, OPENAI_MODEL, stripFences, codeContextBlock, samplingFor } from "./aiShared.js";
 
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionCreateParams["messages"][number];
 
@@ -102,10 +102,10 @@ function sanitize(e: Partial<EnrichedBug>, raw: string): EnrichedBug {
 async function callOnce(messages: ChatMessage[]) {
   const res = await getOpenAiClient().chat.completions.create({
     model: OPENAI_MODEL,
-    temperature: 0.2,
+    ...samplingFor({ temperature: 0.2 }),
     response_format: { type: "json_object" } as any,
     messages,
-  });
+  } as any);
   return res.choices[0]?.message?.content || "{}";
 }
 

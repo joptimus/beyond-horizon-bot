@@ -2,7 +2,7 @@
 import OpenAI from "openai";
 import type { CodeContext } from "./codeContextTypes.js";
 import { renderWhereToStart } from "./codeContextTypes.js";
-import { getOpenAiClient, OPENAI_MODEL, stripFences, codeContextBlock } from "./aiShared.js";
+import { getOpenAiClient, OPENAI_MODEL, stripFences, codeContextBlock, samplingFor } from "./aiShared.js";
 
 // Convenience type that always matches the SDK
 type ChatMessage = OpenAI.Chat.Completions.ChatCompletionCreateParams["messages"][number];
@@ -37,7 +37,7 @@ Return ONLY valid JSON with this exact shape:
 Rules:
 - Do NOT copy example labels like "UI", "3D assets", "API/WS endpoint", etc. Replace them with concrete items or use ["None"] / ["No changes"].
 - If a section is N/A, use ["None"] or ["No changes"] (for database) instead of empty arrays.
-- Keep openQuestions to at most 3.
+- Keep openQuestions to at most 2.
 - Output only JSON.
 `;
 
@@ -45,11 +45,15 @@ const QUESTION_RULES = `
 Question quality rules:
 - Ask ONLY what neither the report nor the code context can answer: player intent,
   in-game conditions (ship class, fleet size, location type, economy state), expected outcomes.
-- Never ask for exact reproduction steps when the code context already narrows the area;
-  ask discriminating questions instead (e.g. "in-system or jump-gate warp?").
+- Never restate the request as a question. If the player already named something
+  ("carriers with ships inside them"), do NOT ask whether to include it — that just
+  wastes their time. Bad: "Should carriers be included?" when carriers were requested.
+- Prefer discriminating questions that split the design space (e.g. "any compatible
+  unit, or only specific classes?", "in-system or jump-gate warp?") over yes/no
+  confirmations of something already stated.
 - Phrase questions in player terms (game concepts) — never code terms (no file names,
   function names, or jargon).
-- Cap at 2-3 questions; ask none if the report + code context suffice.
+- Ask at most 2 questions; ask none if the report + code context already suffice.
 `;
 
 // ---- Prompt builders ----
@@ -143,7 +147,7 @@ function sanitize(e: Partial<Enriched>, raw: string): Enriched {
   const telemetry = toArray(e.telemetry);
   const antiCheat = toArray(e.antiCheat);
   const dependencies = toArray(e.dependencies);
-  const openQuestions = toArray(e.openQuestions).slice(0, 3); // cap at 3 here, too
+  const openQuestions = toArray(e.openQuestions).slice(0, 2); // cap at 2 here, too
   const tags = toArray(e.tags);
 
   return {
@@ -181,11 +185,11 @@ function scrubScopeList(list?: unknown[], kind: "client" | "server" | "database"
 async function callOnce(messages: ChatMessage[]) {
   const res = await getOpenAiClient().chat.completions.create({
     model: OPENAI_MODEL,
-    temperature: 0.2,
+    ...samplingFor({ temperature: 0.2 }),
     // Some SDK versions don't expose response_format in types; cast to any to use JSON mode.
     response_format: { type: "json_object" } as any,
     messages,
-  });
+  } as any);
   return res.choices[0]?.message?.content || "{}";
 }
 

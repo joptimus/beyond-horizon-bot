@@ -1,5 +1,5 @@
 // src/dupeCheck.ts
-import { getOpenAiClient, OPENAI_MODEL, stripFences } from "./aiShared.js";
+import { getOpenAiClient, OPENAI_MODEL, stripFences, samplingFor } from "./aiShared.js";
 import { listOpenIssuesByLabel } from "./github.js";
 
 export type DuplicateCandidate = { number: number; title: string; html_url: string };
@@ -39,13 +39,13 @@ export async function findPossibleDuplicates(
 
     const res = await getOpenAiClient().chat.completions.create({
       model: OPENAI_MODEL,
-      temperature: 0,
+      ...samplingFor({ temperature: 0 }),
       response_format: { type: "json_object" } as any,
       messages: [
         { role: "system", content: SYSTEM },
         { role: "user", content: buildPrompt(rawText, candidates) },
       ],
-    });
+    } as any);
 
     const content = res.choices[0]?.message?.content || "{}";
     const parsed = JSON.parse(stripFences(content));

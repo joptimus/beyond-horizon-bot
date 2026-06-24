@@ -7,10 +7,10 @@
 import OpenAI from "openai";
 import type { CodeContext } from "./codeContextTypes.js";
 import { getOpenAiTools, callTool, isRepowiseEnabled, type OpenAiToolDef } from "./repowiseMcp.js";
-import { getOpenAiClient, OPENAI_MODEL, stripFences } from "./aiShared.js";
+import { getOpenAiClient, OPENAI_MODEL, stripFences, samplingFor } from "./aiShared.js";
 
-const MAX_TOOL_CALLS = 5;
-const TIME_BUDGET_MS = 15_000;
+const MAX_TOOL_CALLS = 7;
+const TIME_BUDGET_MS = 20_000;
 const PER_CALL_TIMEOUT_MS = 10_000;
 
 // Hard ceiling on the text of any single tool result fed back to OpenAI. The
@@ -117,6 +117,11 @@ When done, STOP calling tools and reply with ONLY a JSON object of this exact sh
   "affectedSystems": ["Server","Fleet","Client-UI"],
   "confidence": "high" | "medium" | "low"
 }
+Confidence rubric — set "confidence" by how well you VERIFIED the pointers, not by how many you list. Do NOT default to "medium":
+- "high": you opened your top candidate file(s) with get_context (or get_symbol) and confirmed they actually implement the behavior in the report. If you confirmed the files, you MUST say "high".
+- "medium": search surfaced plausible candidates but you did not confirm them (ran out of budget, or only some are confirmed).
+- "low": you found nothing useful (return whereToStart: []), or the matches are unrelated guesses.
+You have budget to confirm — spend a get_context call on your top candidate before settling for "medium".
 Rules: at most 6 pointers; omit "symbol" if not applicable; if you found nothing useful, return whereToStart: [] with confidence "low".
 `;
 
@@ -176,7 +181,7 @@ export async function findCodePointers(
       const res = await withTimeout(
         deps.createCompletion({
           model: OPENAI_MODEL,
-          temperature: 0.1,
+          ...samplingFor({ temperature: 0.1, usesTools: true }),
           messages,
           // Withholding tools forces the model to answer with prose/JSON.
           tools: forceFinal ? undefined : tools,
@@ -247,7 +252,7 @@ export async function findCodePointers(
       messages.push(msg as ChatMessage);
       messages.push({ role: "user", content: "Your previous reply was not valid JSON. Reply with ONLY the JSON object described, nothing else." });
       const retry = await withTimeout(
-        deps.createCompletion({ model: OPENAI_MODEL, temperature: 0, messages }),
+        deps.createCompletion({ model: OPENAI_MODEL, ...samplingFor({ temperature: 0 }), messages }),
         PER_CALL_TIMEOUT_MS,
         "completion (json retry)"
       );

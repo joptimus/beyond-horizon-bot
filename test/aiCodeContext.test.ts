@@ -73,12 +73,12 @@ describe("findCodePointers", () => {
   });
 
   it("never invokes callTool more than the cap even with a large parallel batch", async () => {
-    const batch = { role: "assistant", content: null, tool_calls: Array.from({ length: 7 }, (_, i) => ({ id: `c${i}`, type: "function", function: { name: "search_codebase", arguments: "{}" } })) };
+    const batch = { role: "assistant", content: null, tool_calls: Array.from({ length: 10 }, (_, i) => ({ id: `c${i}`, type: "function", function: { name: "search_codebase", arguments: "{}" } })) };
     const createCompletion = scriptedCompletions([batch, { role: "assistant", content: FINAL_JSON }]);
     const callTool = vi.fn(async () => "x");
     const deps = baseDeps({ createCompletion, callTool });
     const ctx = await findCodePointers("warp", "bug", deps);
-    expect(callTool.mock.calls.length).toBeLessThanOrEqual(5);
+    expect(callTool.mock.calls.length).toBeLessThanOrEqual(7);
     expect(ctx?.confidence).toBe("medium");
   });
 });

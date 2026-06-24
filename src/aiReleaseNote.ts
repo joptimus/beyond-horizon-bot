@@ -2,7 +2,7 @@
 // Turns an aggregated, cross-repo Conventional-Commit bundle (git-cliff --context
 // from SpaceMMORPG + game-server + battle-server-rust) into ONE player-facing
 // release note for the in-game launcher news feed. Reuses the shared OpenAI client.
-import { getOpenAiClient, OPENAI_MODEL, stripFences } from "./aiShared.js";
+import { getOpenAiClient, OPENAI_MODEL, stripFences, samplingFor } from "./aiShared.js";
 
 export interface RepoBundle {
   repo: string;
@@ -103,13 +103,13 @@ ${JSON_SHAPE}
 export async function generateReleaseNote(bundle: ReleaseBundle): Promise<ReleaseNote> {
   const res = await getOpenAiClient().chat.completions.create({
     model: OPENAI_MODEL,
-    temperature: 0.4,
+    ...samplingFor({ temperature: 0.4 }),
     response_format: { type: "json_object" } as any,
     messages: [
       { role: "system", content: SYSTEM_PREFACE },
       { role: "user", content: buildPrompt(bundle) },
     ],
-  });
+  } as any);
 
   const content = res.choices[0]?.message?.content || "{}";
   const parsed = JSON.parse(stripFences(content));
@@ -159,13 +159,13 @@ export async function translateReleaseNote(title: string, body: string): Promise
   const langList = TARGET_LANGS.map((l) => `${l.code} = ${l.name}`).join(", ");
   const res = await getOpenAiClient().chat.completions.create({
     model: OPENAI_MODEL,
-    temperature: 0.3,
+    ...samplingFor({ temperature: 0.3 }),
     response_format: { type: "json_object" } as any,
     messages: [
       { role: "system", content: SYSTEM_PREFACE },
       { role: "user", content: `Target languages: ${langList}\n\nTitle: ${title}\n\nBody:\n${body}\n${TRANSLATE_RULES}` },
     ],
-  });
+  } as any);
 
   let parsed: any;
   try {

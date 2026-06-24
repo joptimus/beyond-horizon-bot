@@ -9,7 +9,27 @@ import type { CodeContext } from "./codeContextTypes.js";
 const API_KEY = process.env.OPENAI_API_KEY;
 if (!API_KEY) throw new Error("Missing OPENAI_API_KEY in .env");
 
-export const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+export const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.4-mini";
+
+// Reasoning models (o-series and gpt-5+) reject a custom `temperature`/`top_p`
+// (the request 400s) and steer behavior with `reasoning_effort` instead. Classic
+// chat models (gpt-4o, gpt-4o-mini) take `temperature` and have no reasoning knob.
+export function isReasoningModel(model: string = OPENAI_MODEL): boolean {
+  return /^(o\d|gpt-5)/i.test(model);
+}
+
+// Per-request sampling fields, model-aware. Classic models get the requested
+// `temperature` (unchanged behavior). Reasoning models drop `temperature`
+// entirely and, ONLY on the tool-calling path, pin `reasoning_effort: "low"`:
+// gpt-5.4+ disables tool calling in Chat Completions when effort is "none" (the
+// reasoning default), so the repowise loop would silently make zero tool calls.
+// Non-tool calls leave effort at the model default to stay cheap/fast.
+export function samplingFor(opts: { temperature?: number; usesTools?: boolean; model?: string } = {}): Record<string, unknown> {
+  if (isReasoningModel(opts.model)) {
+    return opts.usesTools ? { reasoning_effort: "low" } : {};
+  }
+  return { temperature: opts.temperature ?? 0.2 };
+}
 
 let client: OpenAI | null = null;
 export function getOpenAiClient(): OpenAI {

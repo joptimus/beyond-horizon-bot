@@ -53,7 +53,7 @@ Vote embed posted → Discord reactions sync to GitHub comment
 
 - **Runtime**: Node.js 18+
 - **Discord**: discord.js v14 with MessageContent, GuildMessages, GuildMessageReactions intents
-- **AI**: OpenAI API (gpt-4o-mini default)
+- **AI**: OpenAI API (gpt-5.4-mini default)
 - **GitHub**: Octokit REST client
 
 ## Environment Variables
