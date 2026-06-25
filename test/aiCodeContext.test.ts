@@ -1,10 +1,29 @@
 import { describe, it, expect, vi } from "vitest";
 import { findCodePointers, type FindDeps } from "../src/aiCodeContext.js";
 
-// Helper: a fake OpenAI completion that returns a scripted sequence of messages.
-function scriptedCompletions(messages: any[]) {
-  const queue = [...messages];
-  return vi.fn(async () => ({ choices: [{ message: queue.shift() }] }));
+// Helper: a fake Responses API client that returns a scripted sequence of
+// response objects ({ id, output[], output_text }).
+function scriptedResponses(responses: any[]) {
+  const queue = [...responses];
+  return vi.fn(async () => queue.shift() ?? { id: "r-empty", output: [], output_text: "" });
+}
+
+// Build a response whose output is one or more function_call items.
+function toolCallResponse(id: string, calls: Array<{ call_id: string; name?: string; arguments?: string }>) {
+  return {
+    id,
+    output: calls.map((c) => ({
+      type: "function_call",
+      call_id: c.call_id,
+      name: c.name ?? "search_codebase",
+      arguments: c.arguments ?? "{}",
+    })),
+  };
+}
+
+// Build a response whose output is a final text answer.
+function finalResponse(id: string, text: string) {
+  return { id, output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text }] }], output_text: text };
 }
 
 const baseDeps = (over: Partial<FindDeps>): FindDeps => ({
@@ -12,7 +31,7 @@ const baseDeps = (over: Partial<FindDeps>): FindDeps => ({
     { type: "function", function: { name: "search_codebase", description: "d", parameters: { type: "object", properties: {} } } },
   ],
   callTool: async () => "search result text",
-  createCompletion: scriptedCompletions([]),
+  createResponse: scriptedResponses([]),
   now: (() => { let t = 0; return () => (t += 1000); })(), // +1s per call
   enabled: true,
   ...over,
@@ -32,12 +51,12 @@ describe("findCodePointers", () => {
   });
 
   it("runs one tool call then parses the final JSON answer", async () => {
-    const createCompletion = scriptedCompletions([
-      { role: "assistant", content: null, tool_calls: [{ id: "c1", type: "function", function: { name: "search_codebase", arguments: '{"query":"warp"}' } }] },
-      { role: "assistant", content: FINAL_JSON },
+    const createResponse = scriptedResponses([
+      toolCallResponse("r1", [{ call_id: "c1", arguments: '{"query":"warp"}' }]),
+      finalResponse("r2", FINAL_JSON),
     ]);
     const callTool = vi.fn(async () => "warp.ts matches");
-    const deps = baseDeps({ createCompletion, callTool });
+    const deps = baseDeps({ createResponse, callTool });
 
     const ctx = await findCodePointers("fleet stuck warping", "bug", deps);
     expect(callTool).toHaveBeenCalledOnce();
@@ -45,38 +64,36 @@ describe("findCodePointers", () => {
     expect(ctx?.suspectedCause).toBe("state not cleared");
   });
 
-  it("stops after the tool-call cap and forces a final answer", async () => {
-    // 6 tool-call rounds scripted, but cap is 5; the 6th would never be reached.
-    const toolMsg = { role: "assistant", content: null, tool_calls: [{ id: "c", type: "function", function: { name: "search_codebase", arguments: "{}" } }] };
-    const createCompletion = scriptedCompletions([toolMsg, toolMsg, toolMsg, toolMsg, toolMsg, { role: "assistant", content: FINAL_JSON }]);
+  it("answers each tool call then parses the final answer across rounds", async () => {
+    const round = (id: string) => toolCallResponse(id, [{ call_id: id }]);
+    const createResponse = scriptedResponses([round("r1"), round("r2"), round("r3"), finalResponse("r4", FINAL_JSON)]);
     const callTool = vi.fn(async () => "x");
-    const deps = baseDeps({ createCompletion, callTool });
+    const deps = baseDeps({ createResponse, callTool });
 
     const ctx = await findCodePointers("warp", "bug", deps);
-    expect(callTool.mock.calls.length).toBeLessThanOrEqual(5);
-    // Either it forced a final answer (ctx set) or gave up (null) — never throws.
+    expect(callTool.mock.calls.length).toBeLessThanOrEqual(7);
     expect(ctx === null || ctx.confidence === "medium").toBe(true);
   });
 
   it("returns null on malformed JSON after one retry", async () => {
-    const createCompletion = scriptedCompletions([
-      { role: "assistant", content: "not json" },
-      { role: "assistant", content: "still not json" },
+    const createResponse = scriptedResponses([
+      finalResponse("r1", "not json"),
+      finalResponse("r2", "still not json"),
     ]);
-    const deps = baseDeps({ createCompletion });
+    const deps = baseDeps({ createResponse });
     expect(await findCodePointers("warp", "idea", deps)).toBeNull();
   });
 
-  it("returns null and never throws when createCompletion rejects", async () => {
-    const deps = baseDeps({ createCompletion: vi.fn(async () => { throw new Error("openai down"); }) });
+  it("returns null and never throws when createResponse rejects", async () => {
+    const deps = baseDeps({ createResponse: vi.fn(async () => { throw new Error("openai down"); }) });
     expect(await findCodePointers("warp", "bug", deps)).toBeNull();
   });
 
   it("never invokes callTool more than the cap even with a large parallel batch", async () => {
-    const batch = { role: "assistant", content: null, tool_calls: Array.from({ length: 10 }, (_, i) => ({ id: `c${i}`, type: "function", function: { name: "search_codebase", arguments: "{}" } })) };
-    const createCompletion = scriptedCompletions([batch, { role: "assistant", content: FINAL_JSON }]);
+    const batch = toolCallResponse("r1", Array.from({ length: 10 }, (_, i) => ({ call_id: `c${i}` })));
+    const createResponse = scriptedResponses([batch, finalResponse("r2", FINAL_JSON)]);
     const callTool = vi.fn(async () => "x");
-    const deps = baseDeps({ createCompletion, callTool });
+    const deps = baseDeps({ createResponse, callTool });
     const ctx = await findCodePointers("warp", "bug", deps);
     expect(callTool.mock.calls.length).toBeLessThanOrEqual(7);
     expect(ctx?.confidence).toBe("medium");

@@ -18,16 +18,17 @@ export function isReasoningModel(model: string = OPENAI_MODEL): boolean {
   return /^(o\d|gpt-5)/i.test(model);
 }
 
-// Per-request sampling fields, model-aware. Classic models get the requested
-// `temperature` (unchanged behavior). Reasoning models drop `temperature`
-// entirely and, ONLY on the tool-calling path, pin `reasoning_effort: "low"`:
-// gpt-5.4+ disables tool calling in Chat Completions when effort is "none" (the
-// reasoning default), so the repowise loop would silently make zero tool calls.
-// Non-tool calls leave effort at the model default to stay cheap/fast.
-export function samplingFor(opts: { temperature?: number; usesTools?: boolean; model?: string } = {}): Record<string, unknown> {
-  if (isReasoningModel(opts.model)) {
-    return opts.usesTools ? { reasoning_effort: "low" } : {};
-  }
+// Per-request sampling fields for the plain JSON Chat Completions calls (idea/
+// bug enrichment, dupe-check, release notes), model-aware. Classic models get
+// the requested `temperature` (unchanged behavior). Reasoning models reject a
+// custom `temperature` (the request 400s), so we drop it and let them run at
+// their default reasoning effort.
+//
+// NOTE: this is only for tool-FREE calls. Reasoning models (gpt-5.4+) can't do
+// function tool calls in Chat Completions at all, so the repowise tool loop uses
+// the Responses API instead — see aiCodeContext.ts.
+export function samplingFor(opts: { temperature?: number; model?: string } = {}): Record<string, unknown> {
+  if (isReasoningModel(opts.model)) return {};
   return { temperature: opts.temperature ?? 0.2 };
 }
 

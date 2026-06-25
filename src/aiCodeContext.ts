@@ -1,13 +1,19 @@
 // src/aiCodeContext.ts
-// Bounded OpenAI function-calling loop that uses repowise tools to locate the
-// code relevant to a player's idea/bug. Returns a CodeContext or null. Never
-// throws: any failure (disabled, unreachable, timeout, bad JSON) -> null, and
-// enrichment proceeds without code context.
+// Bounded function-calling loop that uses repowise tools to locate the code
+// relevant to a player's idea/bug. Returns a CodeContext or null. Never throws:
+// any failure (disabled, unreachable, timeout, bad JSON) -> null, and enrichment
+// proceeds without code context.
+//
+// Runs on the OpenAI Responses API (/v1/responses), NOT Chat Completions:
+// gpt-5.4+ reasoning models reject function tools in Chat Completions entirely
+// ("use /v1/responses instead"), so tool calling for those models is only
+// possible here. The model's tool calls come back as `function_call` output
+// items; we answer each with a `function_call_output` and thread turns together
+// with `previous_response_id` rather than resending the whole message list.
 
-import OpenAI from "openai";
 import type { CodeContext } from "./codeContextTypes.js";
 import { getOpenAiTools, callTool, isRepowiseEnabled, type OpenAiToolDef } from "./repowiseMcp.js";
-import { getOpenAiClient, OPENAI_MODEL, stripFences, samplingFor } from "./aiShared.js";
+import { getOpenAiClient, OPENAI_MODEL, stripFences, isReasoningModel } from "./aiShared.js";
 
 const MAX_TOOL_CALLS = 7;
 const TIME_BUDGET_MS = 20_000;
@@ -72,13 +78,11 @@ function withTimeout<T>(p: Promise<T>, ms: number, label: string): Promise<T> {
   });
 }
 
-type ChatMessage = OpenAI.Chat.Completions.ChatCompletionMessageParam;
-
 // Injectable dependencies so the loop is unit-testable without network access.
 export type FindDeps = {
   getTools: () => Promise<OpenAiToolDef[]>;
   callTool: (name: string, args: Record<string, unknown>) => Promise<string>;
-  createCompletion: (params: any) => Promise<{ choices: Array<{ message: any }> }>;
+  createResponse: (params: any) => Promise<any>;
   now: () => number;
   enabled: boolean;
 };
@@ -87,7 +91,7 @@ function getDefaultDeps(): FindDeps {
   return {
     getTools: getOpenAiTools,
     callTool,
-    createCompletion: (params) => getOpenAiClient().chat.completions.create(params) as any,
+    createResponse: (params) => getOpenAiClient().responses.create(params) as any,
     now: () => Date.now(),
     enabled: isRepowiseEnabled(),
   };
@@ -146,6 +150,47 @@ function parseFinal(content: string): CodeContext | null {
   }
 }
 
+// repowise tools arrive in Chat Completions shape ({type, function:{name,...}});
+// the Responses API wants them flat ({type:"function", name, description,
+// parameters}). Convert here so repowiseMcp (and its tests) stay unchanged.
+function toResponsesTools(tools: OpenAiToolDef[]): any[] {
+  return tools.map((t) => ({
+    type: "function",
+    name: t.function.name,
+    description: t.function.description,
+    parameters: t.function.parameters,
+  }));
+}
+
+// The function-call items the model emitted this turn (Responses API surfaces
+// them as output items of type "function_call", each with its own call_id).
+function functionCalls(res: any): Array<{ call_id: string; name: string; arguments: string }> {
+  const output = Array.isArray(res?.output) ? res.output : [];
+  return output
+    .filter((o: any) => o?.type === "function_call")
+    .map((o: any) => ({ call_id: String(o.call_id), name: String(o.name), arguments: String(o.arguments ?? "") }));
+}
+
+// The model's final text. The SDK aggregates it into `output_text`; fall back to
+// concatenating the output_text parts of any message items if that's absent.
+function responseText(res: any): string {
+  if (typeof res?.output_text === "string") return res.output_text;
+  const output = Array.isArray(res?.output) ? res.output : [];
+  return output
+    .filter((o: any) => o?.type === "message")
+    .flatMap((m: any) => (Array.isArray(m.content) ? m.content : []))
+    .filter((c: any) => c?.type === "output_text" && typeof c.text === "string")
+    .map((c: any) => c.text)
+    .join("");
+}
+
+// Reasoning models steer with reasoning.effort (and reject temperature); classic
+// models take temperature. "low" effort keeps tool calling available (the
+// default "none" disables it on gpt-5.4+) while staying cheap.
+function samplingParams(): Record<string, unknown> {
+  return isReasoningModel() ? { reasoning: { effort: "low" } } : { temperature: 0.1 };
+}
+
 export async function findCodePointers(
   rawText: string,
   kind: "idea" | "bug",
@@ -155,18 +200,22 @@ export async function findCodePointers(
   if (!deps.enabled) return null;
 
   try {
-    const tools = await deps.getTools();
-    dbg(`enabled, kind=${kind}. Tools offered to OpenAI (${tools.length}):`,
-      tools.map((t) => t.function.name).join(", ") || "(none)");
-    if (!tools.length) return null; // nothing to search with
+    const chatTools = await deps.getTools();
+    dbg(`enabled, kind=${kind}. Tools offered to OpenAI (${chatTools.length}):`,
+      chatTools.map((t) => t.function.name).join(", ") || "(none)");
+    if (!chatTools.length) return null; // nothing to search with
+    const tools = toResponsesTools(chatTools);
 
     const start = deps.now();
-    const messages: ChatMessage[] = [
+    // The first request sends system + user as input items; later turns thread
+    // off previous_response_id and send only the new function_call_output items.
+    let nextInput: any[] = [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: `Kind: ${kind}\nPlayer report:\n"""${rawText}"""` },
     ];
-    dbg("Initial user message fed to OpenAI:", preview(messages[1].content as string));
+    dbg("Initial user message fed to OpenAI:", preview(nextInput[1].content as string));
 
+    let prevId: string | undefined;
     let toolCalls = 0;
     let forceFinal = false;
 
@@ -176,29 +225,31 @@ export async function findCodePointers(
       forceFinal = forceFinal || outOfTime || outOfCalls;
 
       dbg(`OpenAI request: forceFinal=${forceFinal}, toolCalls so far=${toolCalls}, ` +
-        `messages=${messages.length}, tools offered=${forceFinal ? 0 : tools.length}`);
+        `input items=${nextInput.length}, tools offered=${forceFinal ? 0 : tools.length}`);
 
       const res = await withTimeout(
-        deps.createCompletion({
+        deps.createResponse({
           model: OPENAI_MODEL,
-          ...samplingFor({ temperature: 0.1, usesTools: true }),
-          messages,
+          ...(prevId ? { previous_response_id: prevId } : {}),
+          input: nextInput,
           // Withholding tools forces the model to answer with prose/JSON.
           tools: forceFinal ? undefined : tools,
           tool_choice: forceFinal ? undefined : "auto",
+          ...samplingParams(),
         }),
         PER_CALL_TIMEOUT_MS,
-        "completion"
+        "response"
       );
+      if (!res) return null;
+      prevId = res.id;
 
-      const msg = res.choices[0]?.message;
-      if (!msg) return null;
-
-      const calls = msg.tool_calls || [];
+      const calls = functionCalls(res);
       dbg(`OpenAI responded: ${calls.length} tool call(s) requested` +
-        (calls.length ? `: ${calls.map((c: any) => c.function?.name).join(", ")}` : ""));
+        (calls.length ? `: ${calls.map((c) => c.name).join(", ")}` : ""));
       if (!forceFinal && calls.length) {
-        messages.push(msg as ChatMessage);
+        // Every function_call MUST get a matching function_call_output, even
+        // when skipped for budget — otherwise the next request errors.
+        const outputs: any[] = [];
         for (const call of calls) {
           let toolText = "";
           if (toolCalls >= MAX_TOOL_CALLS) {
@@ -208,34 +259,36 @@ export async function findCodePointers(
           } else {
             toolCalls++;
             try {
-              const rawArgs = call.function?.arguments ? JSON.parse(call.function.arguments) : {};
-              const args = sanitizeToolArgs(call.function.name, rawArgs);
-              dbg(`→ calling repowise tool "${call.function.name}" with args:`, JSON.stringify(args));
+              const rawArgs = call.arguments ? JSON.parse(call.arguments) : {};
+              const args = sanitizeToolArgs(call.name, rawArgs);
+              dbg(`→ calling repowise tool "${call.name}" with args:`, JSON.stringify(args));
               const full = await withTimeout(
-                deps.callTool(call.function.name, args),
+                deps.callTool(call.name, args),
                 PER_CALL_TIMEOUT_MS,
-                `tool ${call.function.name}`
+                `tool ${call.name}`
               );
               toolText =
                 full.length > MAX_TOOL_RESULT_CHARS
                   ? `${full.slice(0, MAX_TOOL_RESULT_CHARS)}\n…[truncated ${full.length - MAX_TOOL_RESULT_CHARS} of ${full.length} chars]`
                   : full;
-              dbg(`← repowise "${call.function.name}" returned ${full.length} chars` +
+              dbg(`← repowise "${call.name}" returned ${full.length} chars` +
                 (full.length > MAX_TOOL_RESULT_CHARS ? ` (capped to ${MAX_TOOL_RESULT_CHARS})` : "") +
                 `:`, preview(toolText));
             } catch (err) {
               toolText = `tool error: ${(err as Error).message}`;
-              dbg(`← repowise "${call.function.name}" FAILED:`, (err as Error).message);
+              dbg(`← repowise "${call.name}" FAILED:`, (err as Error).message);
             }
           }
-          messages.push({ role: "tool", tool_call_id: call.id, content: toolText || "(no result)" });
+          outputs.push({ type: "function_call_output", call_id: call.call_id, output: toolText || "(no result)" });
         }
+        nextInput = outputs; // sent against previous_response_id next turn
         continue; // let the model react to tool output
       }
 
       // Final answer expected here.
-      dbg("OpenAI final answer (raw):", preview(msg.content || "(empty)"));
-      const parsed = parseFinal(msg.content || "");
+      const finalText = responseText(res);
+      dbg("OpenAI final answer (raw):", preview(finalText || "(empty)"));
+      const parsed = parseFinal(finalText);
       if (parsed) {
         dbg("Parsed CodeContext:", JSON.stringify(parsed));
         return parsed;
@@ -247,18 +300,21 @@ export async function findCodePointers(
         return null;
       }
 
-      // One retry: nudge for valid JSON, force final.
+      // One retry: nudge for valid JSON (no tools), threaded off this response.
       dbg("Final answer was not valid JSON — retrying once with a JSON-only nudge.");
-      messages.push(msg as ChatMessage);
-      messages.push({ role: "user", content: "Your previous reply was not valid JSON. Reply with ONLY the JSON object described, nothing else." });
       const retry = await withTimeout(
-        deps.createCompletion({ model: OPENAI_MODEL, ...samplingFor({ temperature: 0 }), messages }),
+        deps.createResponse({
+          model: OPENAI_MODEL,
+          previous_response_id: prevId,
+          input: [{ role: "user", content: "Your previous reply was not valid JSON. Reply with ONLY the JSON object described, nothing else." }],
+          ...samplingParams(),
+        }),
         PER_CALL_TIMEOUT_MS,
-        "completion (json retry)"
+        "response (json retry)"
       );
-      const retryContent = retry.choices[0]?.message?.content || "";
-      dbg("OpenAI retry answer (raw):", preview(retryContent || "(empty)"));
-      const retryParsed = parseFinal(retryContent);
+      const retryText = responseText(retry);
+      dbg("OpenAI retry answer (raw):", preview(retryText || "(empty)"));
+      const retryParsed = parseFinal(retryText);
       dbg("Parsed CodeContext after retry:", retryParsed ? JSON.stringify(retryParsed) : "null");
       return retryParsed;
     }

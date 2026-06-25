@@ -23,18 +23,4 @@ describe("samplingFor", () => {
   it("drops temperature for reasoning models (it is unsupported and 400s)", () => {
     expect(samplingFor({ temperature: 0.2, model: "gpt-5.4-mini" })).toEqual({});
   });
-
-  it("pins reasoning_effort to low on the tool-calling path so gpt-5.4+ keeps tool calling enabled", () => {
-    // gpt-5.4+ disables tool calling in Chat Completions when effort is the
-    // default "none" — the repowise loop would otherwise make zero tool calls.
-    expect(samplingFor({ temperature: 0.1, usesTools: true, model: "gpt-5.4-mini" })).toEqual({
-      reasoning_effort: "low",
-    });
-  });
-
-  it("ignores usesTools for classic models (no reasoning knob)", () => {
-    expect(samplingFor({ temperature: 0.1, usesTools: true, model: "gpt-4o-mini" })).toEqual({
-      temperature: 0.1,
-    });
-  });
 });
