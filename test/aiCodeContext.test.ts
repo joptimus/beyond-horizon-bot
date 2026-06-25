@@ -89,6 +89,27 @@ describe("findCodePointers", () => {
     expect(await findCodePointers("warp", "bug", deps)).toBeNull();
   });
 
+  it("recovers the whereToStart object from a garbage-wrapped final answer", async () => {
+    // Reproduces a real gpt-5.4-mini failure: when cut off mid-search the model
+    // dumped leaked tool-call fragments + junk tokens BEFORE the valid object.
+    const valid = JSON.stringify({
+      whereToStart: [{ repo: "game-server", path: "src/game-logic/city/cityProduction.js", symbol: "calculateCityProductionV2", reason: "powerCoverageRatio" }],
+      suspectedCause: "ratio vs percent",
+      affectedSystems: ["Server", "Client-UI"],
+      confidence: "high",
+    });
+    const noisy =
+      '{"query":"power","repo":"SpaceMMORPG"} to=functions.search_codebase  天天中彩票粤\n' +
+      '{"tool_uses":[{"recipient_name":"functions.get_context","parameters":{"targets":["Assets/Scripts/UI/City/CityPageV2.cs"]}}]}' +
+      valid;
+    const createResponse = scriptedResponses([finalResponse("r1", noisy)]);
+    const deps = baseDeps({ createResponse });
+
+    const ctx = await findCodePointers("city power percentage wrong", "bug", deps);
+    expect(ctx?.whereToStart[0].symbol).toBe("calculateCityProductionV2");
+    expect(ctx?.confidence).toBe("high");
+  });
+
   it("never invokes callTool more than the cap even with a large parallel batch", async () => {
     const batch = toolCallResponse("r1", Array.from({ length: 10 }, (_, i) => ({ call_id: `c${i}` })));
     const createResponse = scriptedResponses([batch, finalResponse("r2", FINAL_JSON)]);

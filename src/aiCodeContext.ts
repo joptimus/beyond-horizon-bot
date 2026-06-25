@@ -16,8 +16,11 @@ import { getOpenAiTools, callTool, isRepowiseEnabled, type OpenAiToolDef } from 
 import { getOpenAiClient, OPENAI_MODEL, stripFences, isReasoningModel } from "./aiShared.js";
 
 const MAX_TOOL_CALLS = 7;
-const TIME_BUDGET_MS = 20_000;
-const PER_CALL_TIMEOUT_MS = 10_000;
+// Reasoning models add per-turn latency, so the loop needs more headroom than
+// the original gpt-4o-mini tuning: too tight and the budget trips mid-search,
+// forcing the model to dump a half-finished (and often garbage-wrapped) answer.
+const TIME_BUDGET_MS = 30_000;
+const PER_CALL_TIMEOUT_MS = 15_000;
 
 // Hard ceiling on the text of any single tool result fed back to OpenAI. The
 // useful header (overview/summary/signatures) comes first in every repowise
@@ -129,10 +132,55 @@ You have budget to confirm — spend a get_context call on your top candidate be
 Rules: at most 6 pointers; omit "symbol" if not applicable; if you found nothing useful, return whereToStart: [] with confidence "low".
 `;
 
-function parseFinal(content: string): CodeContext | null {
-  const cleaned = stripFences(content);
+// Yield each top-level {...} substring, brace-matched and string-aware (braces
+// and the escape char inside JSON strings don't count toward nesting).
+function topLevelJsonObjects(s: string): string[] {
+  const out: string[] = [];
+  let depth = 0, start = -1, inStr = false, esc = false;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (inStr) {
+      if (esc) esc = false;
+      else if (ch === "\\") esc = true;
+      else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{") { if (depth === 0) start = i; depth++; }
+    else if (ch === "}" && depth > 0 && --depth === 0 && start >= 0) {
+      out.push(s.slice(start, i + 1));
+      start = -1;
+    }
+  }
+  return out;
+}
+
+// The final answer is supposed to be one JSON object, but a reasoning model that
+// gets cut off mid-search can emit leaked tool-call fragments and junk tokens
+// BEFORE the real object (observed with gpt-5.4-mini: stray `{"tool_uses":[...]}`
+// blocks and garbage text, then the valid whereToStart object last). Pull the
+// intended object out of that noise: parse the whole string if we can, else take
+// the last top-level {...} that parses to an object carrying a whereToStart array.
+function extractAnswerObject(text: string): any | null {
+  const cleaned = stripFences(text);
   try {
-    const obj = JSON.parse(cleaned);
+    const whole = JSON.parse(cleaned);
+    if (whole && typeof whole === "object") return whole;
+  } catch { /* not a clean object — scan for an embedded one */ }
+
+  let chosen: any = null;
+  for (const candidate of topLevelJsonObjects(cleaned)) {
+    try {
+      const obj = JSON.parse(candidate);
+      if (obj && typeof obj === "object" && Array.isArray(obj.whereToStart)) chosen = obj;
+    } catch { /* skip non-JSON fragment */ }
+  }
+  return chosen;
+}
+
+function parseFinal(content: string): CodeContext | null {
+  const obj = extractAnswerObject(content);
+  try {
     if (!obj || !Array.isArray(obj.whereToStart)) return null;
     return {
       whereToStart: obj.whereToStart.slice(0, 6).map((p: any) => ({
