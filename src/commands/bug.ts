@@ -9,6 +9,7 @@ import {
 import { enrichBug, toBugIssueBody, EnrichedBug } from "../aiBug.js";
 import { putPending } from "../pending.js";
 import { findCodePointers } from "../aiCodeContext.js";
+import { sendResearchNotice, renameThread } from "../researchNotice.js";
 import { findPossibleDuplicates, renderDuplicatesBlock } from "../dupeCheck.js";
 import crypto from "node:crypto";
 
@@ -49,6 +50,19 @@ export async function execute(interaction: ChatInputCommandInteraction) {
 
   await interaction.deferReply({ ephemeral: true });
 
+  // Open the thread + post a "researching" notice BEFORE the slow work so the
+  // player sees immediate progress. Rename to the AI title once enrichment ends.
+  const ch = interaction.channel;
+  if (!ch || !(ch as any).isTextBased?.()) {
+    await interaction.editReply("❌ Cannot create a thread in this channel.");
+    return;
+  }
+  const thread = await (ch as any).threads.create({
+    name: `[BUG] ${rawText.slice(0, 80)}`.slice(0, 95),
+    autoArchiveDuration: 1440,
+  });
+  await sendResearchNotice(thread, interaction.user.id);
+
   const codeContext = await findCodePointers(rawText, "bug");
 
   const [enriched, dupes] = await Promise.all([
@@ -56,18 +70,7 @@ export async function execute(interaction: ChatInputCommandInteraction) {
     findPossibleDuplicates(rawText, "bug"),
   ]);
   const dupeBlock = renderDuplicatesBlock(dupes);
-
-  const ch = interaction.channel;
-  if (!ch || !(ch as any).isTextBased?.()) {
-    await interaction.editReply("❌ Cannot create a thread in this channel.");
-    return;
-  }
-
-  const threadName = `[BUG] ${(enriched.title || rawText).slice(0, 80)}`.slice(0, 95);
-  const thread = await (ch as any).threads.create({
-    name: threadName,
-    autoArchiveDuration: 1440,
-  });
+  await renameThread(thread, `[BUG] ${(enriched.title || rawText).slice(0, 80)}`);
 
   const id = crypto.randomUUID();
 

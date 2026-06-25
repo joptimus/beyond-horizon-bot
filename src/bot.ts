@@ -39,6 +39,7 @@ import { enrichIdea, toIssueBody } from './ai.js';
 import { enrichBug, toBugIssueBody } from './aiBug.js';
 import { getPending, putPending, delPending, setOnExpire, type PendingIdea } from './pending.js';
 import { findCodePointers } from './aiCodeContext.js';
+import { sendResearchNotice, renameThread } from './researchNotice.js';
 import { findPossibleDuplicates, renderDuplicatesBlock, renderRelatedIssuesSection } from './dupeCheck.js';
 import { testConnectionOnStartup } from './repowiseMcp.js';
 import type { CodeContext } from './codeContextTypes.js';
@@ -335,14 +336,17 @@ function buildSimpleApprovalEmbed(enriched: any, flow: { noun: string; color: nu
 async function handleSimpleFlowSubmission(message: Message, rawText: string, flowKey: SimpleFlowKey) {
 	const flow = SIMPLE_FLOWS[flowKey];
 	const submitterTag = `${message.author.username}#${message.author.discriminator}`;
-	// Acknowledge right away — code search + enrichment can take 20s+ and
-	// prefix commands have no deferReply equivalent.
-	(message.channel as any).sendTyping?.().catch(() => {});
+	// Open the thread + post a "researching" notice BEFORE the slow work so the
+	// player gets an immediate acknowledgement. Rename to the AI title afterward.
+	const inThread = message.channel.isThread();
+	const thread = await getOrStartFlowThread(message, flow.prefix, rawText.slice(0, 80));
+	await sendResearchNotice(thread, message.author.id);
 
 	const codeContext = await findCodePointers(rawText, 'idea');
 	const enriched = await enrichIdea(rawText, submitterTag, { codeContext });
 	const id = crypto.randomUUID();
 	const titleText = (enriched.title || rawText).slice(0, 80);
+	if (!inThread) await renameThread(thread, `[${flow.prefix}] ${titleText}`);
 
 	// Questions exist → ask to Answer or Skip (inside a thread)
 	if (enriched.openQuestions?.length) {
@@ -361,7 +365,6 @@ async function handleSimpleFlowSubmission(message: Message, rawText: string, flo
 			new ButtonBuilder().setCustomId(`${flowKey}:skip:${id}`).setLabel('Skip to approval').setStyle(ButtonStyle.Secondary)
 		);
 
-		const thread = await getOrStartFlowThread(message, flow.prefix, titleText);
 		const promptMsg = await thread.send({
 			content: `<@${message.author.id}> I have a few quick questions before finalizing. Answer now or skip:`,
 			embeds: [qEmbed],
@@ -386,9 +389,7 @@ async function handleSimpleFlowSubmission(message: Message, rawText: string, flo
 		return;
 	}
 
-	// No questions → straight to approval (in a thread)
-	const thread = await getOrStartFlowThread(message, flow.prefix, titleText);
-
+	// No questions → straight to approval (in the thread opened above)
 	putPending({
 		type: flowKey,
 		id,
@@ -462,12 +463,17 @@ client.on(Events.MessageCreate, async (message: Message) => {
 			if (!rawText) return message.reply('❗ Usage: `!idea <your idea>`');
 
 			const submitterTag = `${message.author.username}#${message.author.discriminator}`;
-			// Acknowledge right away — code search + enrichment can take 20s+ and
-			// prefix commands have no deferReply equivalent.
-			(message.channel as any).sendTyping?.().catch(() => {});
+			// Open the thread + post a "researching" notice BEFORE the slow work, so
+			// the player gets an immediate acknowledgement (code search + enrichment
+			// can take 20-40s on a reasoning model). Rename to the AI title afterward.
+			const inThread = message.channel.isThread();
+			const thread = await getOrStartIdeaThread(message, rawText.slice(0, 80));
+			await sendResearchNotice(thread, message.author.id);
+
 			// 1) First pass enrichment
 			const codeContext = await findCodePointers(rawText, 'idea');
 			const enriched = await enrichIdea(rawText, submitterTag, { codeContext });
+			if (!inThread) await renameThread(thread, `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`);
 			const id = crypto.randomUUID();
 
 			// 2) If questions exist → ask to Answer or Skip (inside a thread)
@@ -487,10 +493,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 					new ButtonBuilder().setCustomId(`idea:skip:${id}`).setLabel('Skip to approval').setStyle(ButtonStyle.Secondary)
 				);
 
-				// 🔹 Create (or reuse) a thread for this idea
-				const thread = await getOrStartIdeaThread(message, (enriched.title || rawText).slice(0, 80));
-
-				// Post the prompt INSIDE the thread
+				// Post the prompt INSIDE the thread opened above
 				const promptMsg = await thread.send({
 					content: `<@${message.author.id}> I have a few quick questions before finalizing. Answer now or skip:`,
 					embeds: [qEmbed],
@@ -516,9 +519,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 				return; // stop here; later steps continue in the thread
 			}
 
-			// 3) No questions → go straight to approval (in a thread)
-			const thread = await getOrStartIdeaThread(message, (enriched.title || rawText).slice(0, 80));
-
+			// 3) No questions → go straight to approval (in the thread opened above)
 			putPending({
 				type: 'idea',
 				id,
@@ -614,9 +615,18 @@ client.on(Events.MessageCreate, async (message: Message) => {
 			if (!rawText) return message.reply('❗ Usage: `!bug <description>`');
 
 			const submitterTag = message.author.tag;
-			// Acknowledge right away — code search + enrichment can take 20s+ and
-			// prefix commands have no deferReply equivalent.
-			(message.channel as any).sendTyping?.().catch(() => {});
+			// Open the thread + post a "researching" notice BEFORE the slow work so
+			// the player gets an immediate acknowledgement. Rename to the AI title
+			// afterward (only for threads we created, not a channel we're already in).
+			const inThread = message.channel.isThread();
+			const thread = inThread
+				? message.channel
+				: await message.startThread({
+						name: `[BUG] ${rawText.slice(0, 80)}`.slice(0, 95),
+						autoArchiveDuration: 1440,
+				  });
+			await sendResearchNotice(thread, message.author.id);
+
 			const codeContext = await findCodePointers(rawText, 'bug');
 			const [enriched, dupes] = await Promise.all([
 				enrichBug(rawText, submitterTag, { codeContext }),
@@ -624,18 +634,7 @@ client.on(Events.MessageCreate, async (message: Message) => {
 			]);
 			const dupeBlock = renderDuplicatesBlock(dupes);
 			const id = crypto.randomUUID();
-
-			// Create thread for bug report
-			const threadName = `[BUG] ${(enriched.title || rawText).slice(0, 80)}`.slice(0, 95);
-			let thread;
-			if (message.channel.isThread()) {
-				thread = message.channel;
-			} else {
-				thread = await message.startThread({
-					name: threadName,
-					autoArchiveDuration: 1440,
-				});
-			}
+			if (!inThread) await renameThread(thread, `[BUG] ${(enriched.title || rawText).slice(0, 80)}`);
 
 			if (enriched.openQuestions?.length) {
 				const questionsList = enriched.openQuestions

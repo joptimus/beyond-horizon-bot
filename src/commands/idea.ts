@@ -9,6 +9,7 @@ import {
 import { enrichIdea, toIssueBody, Enriched } from "../ai.js";
 import { putPending } from "../pending.js";
 import { findCodePointers } from "../aiCodeContext.js";
+import { sendResearchNotice, renameThread } from "../researchNotice.js";
 import crypto from "node:crypto";
 
 export const data = new SlashCommandBuilder()
@@ -54,25 +55,26 @@ export async function execute(interaction: ChatInputCommandInteraction) {
   // Ephemeral pointer while we work + create a thread
   await interaction.deferReply({ ephemeral: true });
 
-  const codeContext = await findCodePointers(rawText, "idea");
-
-  // First pass enrichment
-  const enriched = await enrichIdea(rawText, submitterTag, { codeContext });
-
-  // Create (or fail gracefully) a thread in the current channel
+  // Open the thread + post a "researching" notice BEFORE the slow work so the
+  // player sees immediate progress. Rename to the AI title once enrichment ends.
   const ch = interaction.channel;
   // @ts-ignore runtime has isTextBased
   if (!ch || !ch.isTextBased?.()) {
     await interaction.editReply("❌ Cannot create a thread in this channel.");
     return;
   }
-
-  const threadName = `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`.slice(0, 95);
   // threads.create is available on text/news/forum parents; cast to any for safety
   const thread = await (ch as any).threads.create({
-    name: threadName,
+    name: `[IDEA] ${rawText.slice(0, 80)}`.slice(0, 95),
     autoArchiveDuration: 1440, // 24h; tweak as desired
   });
+  await sendResearchNotice(thread, interaction.user.id);
+
+  const codeContext = await findCodePointers(rawText, "idea");
+
+  // First pass enrichment
+  const enriched = await enrichIdea(rawText, submitterTag, { codeContext });
+  await renameThread(thread, `[IDEA] ${(enriched.title || rawText).slice(0, 80)}`);
 
   // If there are open questions → show Answer / Skip buttons (inside the thread)
   if (enriched.openQuestions && enriched.openQuestions.length > 0) {
