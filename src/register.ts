@@ -17,9 +17,18 @@ async function main() {
 
   const commands = [Idea.data, IdeasTop.data, Priority.data, Bug.data, Verify.data, Invite.data, ExportChat.data].map(c => c.toJSON());
 
-  // Guild-scoped. For prod global, use Routes.applicationCommands(appId)
-  await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: commands });
-  console.log('✅ Slash commands registered');
+  // Global registration: commands become available in every server the bot is
+  // in (and future ones). Note: the first global publish can take up to ~1 hour
+  // to propagate across Discord, unlike instant guild-scoped updates.
+  await rest.put(Routes.applicationCommands(appId), { body: commands });
+  console.log('✅ Global slash commands registered');
+
+  // Clear any leftover guild-scoped copies so the dev/primary guild doesn't show
+  // each command twice (one global + one guild). Safe to skip if unset.
+  if (guildId) {
+    await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: [] });
+    console.log(`🧹 Cleared guild-scoped commands in ${guildId}`);
+  }
 }
 
 main().catch((e) => {
