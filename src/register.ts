@@ -6,6 +6,7 @@ import * as Priority from './commands/priority.js';
 import * as Bug from './commands/bug.js';
 import * as Verify from './commands/verify.js';
 import * as Invite from './commands/invite.js';
+import * as ExportChat from './commands/exportChat.js';
 
 async function main() {
   const token = process.env.DISCORD_TOKEN!;
@@ -14,7 +15,7 @@ async function main() {
 
   const rest = new REST({ version: '10' }).setToken(token);
 
-  const commands = [Idea.data, IdeasTop.data, Priority.data, Bug.data, Verify.data, Invite.data].map(c => c.toJSON());
+  const commands = [Idea.data, IdeasTop.data, Priority.data, Bug.data, Verify.data, Invite.data, ExportChat.data].map(c => c.toJSON());
 
   // Guild-scoped. For prod global, use Routes.applicationCommands(appId)
   await rest.put(Routes.applicationGuildCommands(appId, guildId), { body: commands });

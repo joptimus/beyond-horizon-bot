@@ -33,6 +33,7 @@ import * as Priority from './commands/priority.js';
 import * as BugSlash from './commands/bug.js';
 import * as VerifySlash from './commands/verify.js';
 import * as InviteSlash from './commands/invite.js';
+import * as ExportChatSlash from './commands/exportChat.js';
 
 // ---- AI & pending store for Q→A→Approval flow ----
 import { enrichIdea, toIssueBody } from './ai.js';
@@ -89,6 +90,7 @@ const CMDS: Record<string, any> = {
 	[BugSlash.data.name]: BugSlash,
 	[VerifySlash.data.name]: VerifySlash,
 	[InviteSlash.data.name]: InviteSlash,
+	[ExportChatSlash.data.name]: ExportChatSlash,
 };
 
 // =====================
